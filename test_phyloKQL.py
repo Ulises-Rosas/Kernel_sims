@@ -89,17 +89,8 @@ def get_from_file(leaves, filename = "./traits_R.csv"):
 
     return X
 
-def simTraitsR(tree_file, leaves, sigma2, alpha, seed = 12038):
-    script = '/Users/ulises/Desktop/SLL/KRGEE/rTrait_script.R'
-    os.system(f'Rscript {script} {tree_file} {sigma2} {alpha} {seed}')
 
-    X = get_from_file(leaves, "./traits_R.csv")
-    os.system('rm traits_R.csv')
-    return X
-
-
-def simulate_data(seed, 
-                  D, root, leaves, adj, C, 
+def simulate_data(D, root, leaves, adj, C, 
                   tree,
                   test_num = 0.5, 
                   sigma=1, alpha_ou = 0.5,
@@ -108,14 +99,12 @@ def simulate_data(seed,
                   data_model = 'spiral',
                   bias=None, 
                   process = 'OU',
-                  spps_test = []):
+                  spps_test = [],
+                  rng = np.random.default_rng(seed=12038),
+                  data_process = 'BM'):
     """
     Following binaryPGLMM {ape} code for generating correlated data
-    """
-    np.random.seed(seed)
-    rng = np.random.default_rng(seed=seed)
-
-    
+    """    
     
     # # Step 1: Define correlation structure for observations
     # get_vcv is a deterministic function, so leaves1 and leaves2 should be the same
@@ -128,13 +117,13 @@ def simulate_data(seed,
 
     V = process_D(D, root, leaves, adj, C, 
                   sigma2=sigma, alpha=alpha_ou,
-                    process="BM")
+                    process=data_process)
     
     Ve = process_D(D, root, leaves, adj, C, 
                   sigma2=sigma_e, alpha=alpha_ou_e, 
-                  process="BM")
+                  process=data_process)
 
-    V = np.round(V, decimals=3)  # Round to 3 decimals to avoid numerical issues
+    V = np.round(V, decimals=5) 
     n = V.shape[0]
 
     if process == 'OU':
@@ -150,9 +139,8 @@ def simulate_data(seed,
     # print(V[0:5,0:5])
     # print(R[0:5,0:5])
 
-    X = np.random.multivariate_normal(np.zeros(n), V, 2).T
-
-    e = np.random.multivariate_normal(np.zeros(n), Ve, 1).T.ravel()
+    X = rng.multivariate_normal(np.zeros(n), V, 2).T
+    e = rng.multivariate_normal(np.zeros(n), Ve, 1).T.ravel()
 
     # sine + cosine pattern
     if data_model == 'sine_cosine':
@@ -193,7 +181,7 @@ def simulate_data(seed,
         # linear pattern
         b = -0.6 if bias is None else bias
         # eta = 1.5*X[:, 0] + 1.5*X[:, 1] + b + e
-        eta = 1*np.random.normal(0, 1.5, size=X.shape[0]) + 1.5*np.random.normal(0, 2.5, size=X.shape[0]) + b + e
+        eta = 1*rng.normal(0, 1.5, size=X.shape[0]) + 1.5*rng.normal(0, 2.5, size=X.shape[0]) + b + e
 
     else:
         raise ValueError(f"Unknown model: {data_model}")
@@ -252,14 +240,10 @@ def phylocorrected_logistic(lkrgee, Bphyolm, X_test, X_train, y_train, vcv_test_
 def main(data_model = 'spiral', seed = 12038, 
          test_num = 0.3, ID = "test", M1 = 1, M2 = 1, 
          tree_file = "test_tree_v5.txt", process = 'OU',
-         cores = 1):
+         cores = 1, verbose = True, tol = 1e-6, data_process = 'BM',
+         use_qn = False):
 
     # # ref: Kernel methods in computational biology, pp. 62
-    # params = {
-    #     'lam' : np.logspace(-10, 0, 100, base=2),
-    #     'gamma'  : np.logspace(-15, 3, 100, base=2),
-    # }
-
     params = {
         'lam' : np.logspace(-5, 15, 100, base=2),
         # 'lam' : np.logspace(-5, 0, 100, base=2),
@@ -281,7 +265,7 @@ def main(data_model = 'spiral', seed = 12038,
     fix_phi = True
     cv_sample = 100 # number of hyperparameters to test
     cv_folds = 5
-    tol = 1e-5
+    # tol = 1e-6
     # cores = cores
     max_iter = 100
     # max_iter = 50
@@ -289,38 +273,38 @@ def main(data_model = 'spiral', seed = 12038,
     nested_loop_verbose = True
 
 
-    np.random.seed(seed=seed)
+    rng = np.random.default_rng(seed=seed)
 
-    # C1 = 2**np.random.uniform(-3, 4, 56)
-    # C2 = 2**np.random.uniform(-3, 4, 56)
-    # SW = [1]
+    # C1 = 2**rng.uniform(-3, 4, 56)
+    # C2 = 2**rng.uniform(-3, 4, 56)
+    # SW = [1,5,10]
 
     C1 = np.linspace(1, 2, num = 1)
     C2 = np.linspace(1, 2, num = 1)
-    SW = [3]
 
-    lkrr = Logistic(get_corr= False, tol=tol, 
-                    max_iter=max_iter, kernel='rbf', 
-                    verbose=not False, 
-                    fix_phi = fix_phi, 
-                    add_extraK=True)
-    lkrr.process = process
+    # C1 = 2**rng.uniform(-3, 4, 1)
+    # C2 = 2**rng.uniform(-3, 4, 2)
+    # C1 = [1.8645813556311759]
+    # C2 = [1.945659525252371, 10.491859569573467]
+    SW = [1]
 
-
-    lkrgee = Logistic(get_corr = False, tol = tol, 
-                    max_iter = max_iter, kernel = 'rbf', 
-                    verbose = True,
-                    fix_phi = fix_phi)
-
-    lkrgee.process = process
-
-    log_reg = LogisticRegression()
-    rf_model = RandomForestClassifier(n_estimators=100, random_state=seed)
 
     out = {}
     for split_weight in SW:
         for c1 in C1:
             for c2 in C2:
+
+                lkrr = Logistic(get_corr= False, tol=tol, 
+                                max_iter=max_iter, kernel='rbf', 
+                                verbose=not False, 
+                                fix_phi = fix_phi, 
+                                add_extraK=True)  
+                lkrr.process = process
+                lkrr.use_quasi_newton = use_qn
+
+                log_reg = LogisticRegression()
+                rf_model = RandomForestClassifier(n_estimators=100, random_state=seed)
+
 
                 alpha_ou = M1 / t_max
                 sigma = 2 * alpha_ou * c1
@@ -328,17 +312,12 @@ def main(data_model = 'spiral', seed = 12038,
                 alpha_ou_e = M2 / t_max
                 sigma_e = 2 * alpha_ou_e * c2
 
-
-                if nested_loop_verbose:
-                    print("alpha_ou: ", alpha_ou)
-                    print("alpha_ou_e: ", alpha_ou_e)
-                    print("sigma: ", sigma)
-                    print("sigma_e:", sigma_e)
+                print("c1: ", c1, "c2: ", c2, "split_weight: ", split_weight)
+                print("alpha_ou: ", alpha_ou, "alpha_ou_e: ", alpha_ou_e, "sigma: ", sigma, "sigma_e:", sigma_e)
 
 
                 (X, y, train_idx, 
                 test_idx, R, W) = simulate_data(
-                            seed=seed,
                             D=D,root=root,leaves=leaves,adj=adj,C=C,
                             tree=tree,
                             test_num=test_num,
@@ -349,7 +328,9 @@ def main(data_model = 'spiral', seed = 12038,
                             sigma_e = sigma_e,
                             data_model = data_model,
                             process = process,
-                            spps_test=test_spps
+                            spps_test=test_spps,
+                            rng = rng,
+                            data_process = data_process
                             )
 
                 if nested_loop_verbose:
@@ -394,7 +375,7 @@ def main(data_model = 'spiral', seed = 12038,
                     lkrr,  W[train_idx], params,
                     folds=cv_folds,
                     sample=cv_sample, 
-                    verbose= False, 
+                    verbose= verbose, 
                     seed=seed,
                     cores = cores
                 )
@@ -402,34 +383,6 @@ def main(data_model = 'spiral', seed = 12038,
                 if nested_loop_verbose:
                     print('lkrr (+ phylo K) CV Time: ', time.time() - start)
                     print('lkrr best params: ', lkrr_best_params)
-
-                # import time
-                # start = time.time()
-                # lkrgee_best_params = k_fold_cv_weigthed(
-                #     X_train, y_train, vcv_train,
-                #     lkrgee,  W[train_idx], params,
-                #     folds=cv_folds,
-                #     sample=cv_sample, 
-                #     verbose=not False, 
-                #     seed=seed
-                # )
-                # # print(W[train_idx])
-                # if nested_loop_verbose:
-                #     print('lkrgee CV Time: ', time.time() - start)
-                #     print('lkrgee best params: ', lkrgee_best_params)
-
-                # lkrgee.set_params(**lkrgee_best_params)
-                # lkrgee.fit(X_train, y_train, vcv_train)
-
-                # lkrgee_loss = np.mean(lkrgee.predict(X_test, vcv_test_12) == y_test)
-                # lkrgee_loss_nc = np.mean(lkrgee.predict(X_test, None) == y_test)
-
-                # if nested_loop_verbose:
-                #     print('alpha param:', np.exp(-lkrgee.psc))
-                #     print('signal (meaningless if process is not OU):',lkrgee.psc)
-
-                    # print('lkrgee acc: ', lkrgee_loss_nc)
-                    # print('lkrgee acc (corr.): ', lkrgee_loss)
 
                 lkrr.set_params(**lkrr_best_params)
 
@@ -443,14 +396,13 @@ def main(data_model = 'spiral', seed = 12038,
                     print('signal (meaningless if process is not OU):',lkrr.psc)
 
 
-                lkrr_loss = np.mean(lkrr.predict(X_test, vcv_test_12) == y_test)
+                lkrr_probs = lkrr.predict_proba(X_test, vcv_test_12)
+                lkrr_loss = np.mean((lkrr_probs >= 0.5) == y_test)
 
                 if nested_loop_verbose:
                     print('lkrr phi:', lkrr.phi )
                     print('lkrr (+phylo K) acc: ', lkrr_loss)
                     
-
-                lkrr_probs = lkrr.predict_proba(X_test, vcv_test_12)
                 # print("inverse calculated:", lkrr.inv_calculated)
 
                 if process == 'OU':
@@ -490,9 +442,7 @@ def main(data_model = 'spiral', seed = 12038,
                     log_reg_probs, 
                     rf_probs, 
                     lkrr_probs, 
-                    lkrr_probs_corr, 
-                    # lkrgee_probs, 
-                    # lkrgee_probs_corrected
+                    lkrr_probs_corr,
                     ]
                 print()
 
@@ -526,22 +476,64 @@ if __name__ == "__main__":
     parser.add_argument('--ID', type=str, default='test', help='Identifier for the experiment (default: test)')
     parser.add_argument('--M1', type=float, default=1, help='Parameter M1 (default: 1)')
     parser.add_argument('--M2', type=float, default=1, help='Parameter M2 (default: 1)')
+    parser.add_argument('-v','--verbose', action='store_true', help='Enable verbose output')
+    parser.add_argument('-t', '--tol', type=float, default=1e-6, help='Tolerance for convergence (default: 1e-6)')
+    parser.add_argument('-d', '--data_process', type = str, default = 'BM', help = 'Data process for correlation (default: BM)')
+    parser.add_argument('-q', '--use_qn', action='store_true', help='Use quasi-Newton method (default: False)')
     args = parser.parse_args()
 
     main(data_model=args.data_model, seed=args.seed,
           test_num=args.test_num, ID=args.ID, M1=args.M1, M2=args.M2, tree_file=args.tree_file,
           process=args.process,
-          cores=args.cores
+          cores=args.cores, verbose=args.verbose, tol=args.tol,
+          data_process=args.data_process,
+          use_qn=args.use_qn
           )
 
 """
-time python test_phyloKQL.py --data_model circle2\
-        --seed 1994\
-        --test_num 0.4 --tree_file test_tree_v5.txt\
-        --ID test --M1 1 --M2 1 -p OU --cores 5
+time python test_phyloKQL.py --data_model circle2 --test_num 0.5\
+        --tree_file test_tree_v5.txt --ID test --M1 1 --M2 1 -p OU --cores 5\
+        --data_process BM --use_qn --tol 1e-6
 
 # used at the cluster
 python test_phyloKQL.py --data_model circle2\
                 --M1 1.0 --M2 1.0 --ID 1kspps_armijo_BM\
                 --tree_file test_tree_v7.txt -p 'BM'    
 """
+
+
+# region: old code
+                # lkrgee = Logistic(get_corr = False, tol = tol, 
+                #                 max_iter = max_iter, kernel = 'rbf', 
+                #                 verbose = True,
+                #                 fix_phi = fix_phi)
+                # lkrgee.process = process
+
+                # import time
+                # start = time.time()
+                # lkrgee_best_params = k_fold_cv_weigthed(
+                #     X_train, y_train, vcv_train,
+                #     lkrgee,  W[train_idx], params,
+                #     folds=cv_folds,
+                #     sample=cv_sample, 
+                #     verbose=not False, 
+                #     seed=seed
+                # )
+                # # print(W[train_idx])
+                # if nested_loop_verbose:
+                #     print('lkrgee CV Time: ', time.time() - start)
+                #     print('lkrgee best params: ', lkrgee_best_params)
+
+                # lkrgee.set_params(**lkrgee_best_params)
+                # lkrgee.fit(X_train, y_train, vcv_train)
+
+                # lkrgee_loss = np.mean(lkrgee.predict(X_test, vcv_test_12) == y_test)
+                # lkrgee_loss_nc = np.mean(lkrgee.predict(X_test, None) == y_test)
+
+                # if nested_loop_verbose:
+                #     print('alpha param:', np.exp(-lkrgee.psc))
+                #     print('signal (meaningless if process is not OU):',lkrgee.psc)
+
+                    # print('lkrgee acc: ', lkrgee_loss_nc)
+                    # print('lkrgee acc (corr.): ', lkrgee_loss)
+# endregion: old code
