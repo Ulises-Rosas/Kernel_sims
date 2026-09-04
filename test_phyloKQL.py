@@ -194,7 +194,7 @@ def simulate_data(D, root, leaves, adj, C,
     Indx = int(test_num*X.shape[0])
     
     A = alpha_weighting(tree, alpha=split_weight, 
-                        tol = 1e-8, branch_length= False)
+                        tol = 1e-15, branch_length= False)
     # match order of rows using leaves1
     P = np.array([A[leaf] for leaf in names])
 
@@ -241,7 +241,7 @@ def main(data_model = 'spiral', seed = 12038,
          test_num = 0.3, ID = "test", M1 = 1, M2 = 1, 
          tree_file = "test_tree_v5.txt", process = 'OU',
          cores = 1, verbose = True, tol = 1e-6, data_process = 'BM',
-         use_qn = False):
+         use_qn = False, SW = [1,5,10]):
 
     # # ref: Kernel methods in computational biology, pp. 62
     params = {
@@ -284,9 +284,11 @@ def main(data_model = 'spiral', seed = 12038,
 
     # C1 = 2**rng.uniform(-3, 4, 1)
     # C2 = 2**rng.uniform(-3, 4, 2)
-    # C1 = [1.8645813556311759]
-    # C2 = [1.945659525252371, 10.491859569573467]
-    SW = [1]
+    
+    # C1 = [7.557842333105592 ]
+    # C2 = [11.403060458516384]
+    # SW = [1]
+    # SW = [1]
 
 
     out = {}
@@ -301,6 +303,7 @@ def main(data_model = 'spiral', seed = 12038,
                                 add_extraK=True)  
                 lkrr.process = process
                 lkrr.use_quasi_newton = use_qn
+                lkrr.memory_qn = 10
 
                 log_reg = LogisticRegression()
                 rf_model = RandomForestClassifier(n_estimators=100, random_state=seed)
@@ -480,6 +483,7 @@ if __name__ == "__main__":
     parser.add_argument('-t', '--tol', type=float, default=1e-6, help='Tolerance for convergence (default: 1e-6)')
     parser.add_argument('-d', '--data_process', type = str, default = 'BM', help = 'Data process for correlation (default: BM)')
     parser.add_argument('-q', '--use_qn', action='store_true', help='Use quasi-Newton method (default: False)')
+    parser.add_argument('--SW', nargs='+', type=float, default=[1,5,10], help='List of split weights (default: [1,5,10])')
     args = parser.parse_args()
 
     main(data_model=args.data_model, seed=args.seed,
@@ -487,8 +491,9 @@ if __name__ == "__main__":
           process=args.process,
           cores=args.cores, verbose=args.verbose, tol=args.tol,
           data_process=args.data_process,
-          use_qn=args.use_qn
-          )
+          use_qn=args.use_qn,
+          SW=args.SW)
+          
 
 """
 time python test_phyloKQL.py --data_model circle2 --test_num 0.5\
