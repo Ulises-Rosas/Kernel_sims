@@ -241,14 +241,28 @@ def main(data_model = 'spiral', seed = 12038,
          test_num = 0.3, ID = "test", M1 = 1, M2 = 1, 
          tree_file = "test_tree_v5.txt", process = 'OU',
          cores = 1, verbose = True, tol = 1e-6, data_process = 'BM',
-         use_qn = False, SW = [1,5,10]):
+         use_qn = False, SW = [1,5,10], folder_dir = '.', 
+         do_adj = False, # adjust the level of correction for the latent space,
+         do_corr = False # do correction during cv
+         ):
+
+    if not do_corr and do_adj:
+        raise ValueError("Cannot adjust latent space without correction during CV")
+
 
     # # ref: Kernel methods in computational biology, pp. 62
-    params = {
-        'lam' : np.logspace(-5, 15, 100, base=2),
-        # 'lam' : np.logspace(-5, 0, 100, base=2),
-        'gamma'  : np.logspace(-15, 3, 100, base=2),
-    }
+    if not do_adj:
+        params = {
+            'lam' : np.logspace(-5, 15, 100, base=2),
+            'gamma'  : np.logspace(-15, 3, 100, base=2),
+        }
+    else:
+        params = {
+            'lam' : np.logspace(-5, 15, 100, base=2),
+            'gamma'  : np.logspace(-15, 3, 100, base=2),
+            'corr' : np.logspace(-10, 0, 100, base=2)
+            # 'corr' : np.logspace(-5, 0, 100, base=2)
+        }
 
     with open(tree_file, 'r') as f: 
         tree = f.read().strip()
@@ -275,23 +289,30 @@ def main(data_model = 'spiral', seed = 12038,
 
     rng = np.random.default_rng(seed=seed)
 
-    # C1 = 2**rng.uniform(-3, 4, 56)
-    # C2 = 2**rng.uniform(-3, 4, 56)
+    C1 = 2**rng.uniform(-3, 4, 56)
+    C2 = 2**rng.uniform(-3, 4, 56)
     # SW = [1,5,10]
 
-    C1 = np.linspace(1, 2, num = 1)
-    C2 = np.linspace(1, 2, num = 1)
+    # C1 = np.linspace(1, 2, num = 1)
+    # C2 = np.linspace(1, 2, num = 1)
 
-    # C1 = 2**rng.uniform(-3, 4, 1)
+    # C1 = 2**rng.uniform(-3, 4, 1)    
     # C2 = 2**rng.uniform(-3, 4, 2)
     
-    # C1 = [7.557842333105592 ]
-    # C2 = [11.403060458516384]
+    # C1 = [ 5 ]
+    # C2 = [ 0.5 ]
+
+    # c1_c2_str = "1.80 0.147"
+    # # c1_c2_str = "4.25 0.355"
+    # c1_c2 = c1_c2_str.strip().split()
+    # C1 = [float(c1_c2[0])]
+    # C2 = [float(c1_c2[1])]
+
     # SW = [1]
     # SW = [1]
 
 
-    out = {}
+    out = {} 
     for split_weight in SW:
         for c1 in C1:
             for c2 in C2:
@@ -304,6 +325,8 @@ def main(data_model = 'spiral', seed = 12038,
                 lkrr.process = process
                 lkrr.use_quasi_newton = use_qn
                 lkrr.memory_qn = 10
+                lkrr.do_corr = do_corr
+                lkrr.corr_type = do_adj # ignore if do_corr is False, since it is not possible to adjust the latent space without correction during CV
 
                 log_reg = LogisticRegression()
                 rf_model = RandomForestClassifier(n_estimators=100, random_state=seed)
@@ -398,24 +421,36 @@ def main(data_model = 'spiral', seed = 12038,
                     print('alpha param:', np.exp(-lkrr.psc))
                     print('signal (meaningless if process is not OU):',lkrr.psc)
 
-
+                lkrr.do_corr = False
+                # just to check how it is doing without correction 
                 lkrr_probs = lkrr.predict_proba(X_test, vcv_test_12)
                 lkrr_loss = np.mean((lkrr_probs >= 0.5) == y_test)
 
                 if nested_loop_verbose:
-                    print('lkrr phi:', lkrr.phi )
+                    # print('lkrr phi:', lkrr.phi )
                     print('lkrr (+phylo K) acc: ', lkrr_loss)
                     
                 # print("inverse calculated:", lkrr.inv_calculated)
 
-                if process == 'OU':
-                    lkrr.set_R_inv(R_u(vcv_train, lkrr.psc, center = False))  
-                else:
-                    lkrr.set_R_inv(vcv_train)
-                # print("inverse calculated:", lkrr.inv_calculated)
+                # if process == 'OU':
+                #     est_Rnn = R_u(vcv_train, lkrr.psc, center = False)
+                #     # est_alpha = np.exp(-lkrr.psc)
+                #     # guess_sigma2 = np.var(lkrr.f_curr)
+                #     # print("est_alpha: ", est_alpha, "guess_sigma2: ", guess_sigma2)
+                #     # A = np.diag(lkrr.Vu_func(lkrr.f_curr))
+                #     # print(A)
+                #     # working_R = ((2*est_alpha/guess_sigma2) * est_Rnn)  + A
 
+                #     working_R = est_Rnn                  
+                #     # lkrr.set_R_inv(R_u(vcv_train, lkrr.psc, center = False))  
+                #     lkrr.set_R_inv(working_R)  
+                # else:
+                #     lkrr.set_R_inv(vcv_train)
+
+                # print("inverse calculated:", lkrr.inv_calculated)
+                lkrr.do_corr = True
                 lkrr_probs_corr = lkrr.predict_proba(X_test, vcv_test_12)
-                lkrr_loss_corr = np.mean(lkrr.predict(X_test, vcv_test_12) == y_test)
+                lkrr_loss_corr = np.mean((lkrr_probs_corr >= 0.5) == y_test)
 
                 if nested_loop_verbose:
                     print('lkrr (+phylo K) acc (corr.): ', lkrr_loss_corr)
@@ -430,15 +465,9 @@ def main(data_model = 'spiral', seed = 12038,
                     print('rf acc: ', rf_loss)
                     print('standard log reg acc: ', std_loss)
 
-                log_reg_probs = log_reg.predict_proba(X_test)[:, 1]
-                # lkrgee_probs = lkrgee.predict_proba(X_test, None)
-                # lkrgee_probs_corrected  = lkrgee.predict_proba(X_test, vcv_test_12)
-                
+                log_reg_probs = log_reg.predict_proba(X_test)[:, 1]                
                 rf_probs = rf_model.predict_proba(X_test)[:, 1]
 
-                # sanity_check = np.round(lkrr_probs, 8) == EST_PROBS
-                # print('sanity check: ', np.all(sanity_check))
-                # print(np.round(lkrr_probs, 8))                
 
                 out[(c1,c2,split_weight)] = [
                     y_test,
@@ -450,7 +479,7 @@ def main(data_model = 'spiral', seed = 12038,
                 print()
 
 
-    with open(f"summary_results_{data_model}_{M1}_{M2}_{ID}.csv", 'w') as f:
+    with open(f"{folder_dir}/summary_results_{data_model}_{M1}_{M2}_{ID}.csv", 'w') as f:
 
         for (c1,c2,split_weight), results in out.items():
             (y_test, log_reg_probs, rf_probs, 
@@ -463,8 +492,6 @@ def main(data_model = 'spiral', seed = 12038,
             f.write(','.join([str(c1), str(c2), str(split_weight), 'rf'] + [str(p) for p in rf_probs]) + '\n')
             f.write(','.join([str(c1), str(c2), str(split_weight), 'lkrr'] + [str(p) for p in lkrr_probs]) + '\n')
             f.write(','.join([str(c1), str(c2), str(split_weight), 'lkrr_corr'] + [str(p) for p in lkrr_probs_corr]) + '\n')
-            # f.write(','.join([str(c1), str(c2), str(split_weight), 'lkrgee'] + [str(p) for p in lkrgee_probs]) + '\n')
-            # f.write(','.join([str(c1), str(c2), str(split_weight), 'lkrgee_corrected'] + [str(p) for p in lkrgee_probs_corrected]) + '\n')
 
 
 
@@ -484,6 +511,9 @@ if __name__ == "__main__":
     parser.add_argument('-d', '--data_process', type = str, default = 'BM', help = 'Data process for correlation (default: BM)')
     parser.add_argument('-q', '--use_qn', action='store_true', help='Use quasi-Newton method (default: False)')
     parser.add_argument('--SW', nargs='+', type=float, default=[1,5,10], help='List of split weights (default: [1,5,10])')
+    parser.add_argument('--folder_dir', '-f', type=str, default='.', help='Directory to save results (default: current directory)')
+    parser.add_argument('--do_adj', type=str, choices=[None, 'convex', 'shrink'], default=None, help='Adjust latent space (default: None)')
+    parser.add_argument('--do_corr', action='store_true', help='Do correction during CV (default: False)')
     args = parser.parse_args()
 
     main(data_model=args.data_model, seed=args.seed,
@@ -492,8 +522,11 @@ if __name__ == "__main__":
           cores=args.cores, verbose=args.verbose, tol=args.tol,
           data_process=args.data_process,
           use_qn=args.use_qn,
-          SW=args.SW)
-          
+          SW=args.SW,
+          folder_dir=args.folder_dir,
+          do_adj=args.do_adj,
+          do_corr=args.do_corr
+          )
 
 """
 time python test_phyloKQL.py --data_model circle2 --test_num 0.5\
