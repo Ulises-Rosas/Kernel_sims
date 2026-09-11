@@ -4,21 +4,16 @@ import argparse
 
 
 from phylokrr_dev.alpha_beta_weighting import (alpha_weighting, 
-                                               split_data_idx,
-                                               init_split)
+                                               split_data_idx)
 from phylokrr_dev.block_cross_validation import k_fold_cv_weigthed
 from phylokrr_dev.phyloKPQL import Logistic
-from phylokrr_dev.opt import R_u
 
-from phylokrr.treeio import (get_vcv, 
-                             parseNewickTree, 
-                             parseTree,
+from phylokrr.treeio import (parseNewickTree, 
                              is_leaf, get_adj, get_C, 
-                             get_APSP, get_BM, reroot)
+                             get_APSP, get_BM)
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import roc_curve, auc
 
 
 def pre_process_V(V):
@@ -243,7 +238,8 @@ def main(data_model = 'spiral', seed = 12038,
          cores = 1, verbose = True, tol = 1e-6, data_process = 'BM',
          use_qn = False, SW = [1,5,10], folder_dir = '.', 
          do_adj = False, # adjust the level of correction for the latent space,
-         do_corr = False # do correction during cv
+         do_corr = False, # do correction during cv,
+         corr_scale_error = 'n' # divide error by the sample size. Options: [None, 'std', 'n', 'neff']
          ):
 
     if not do_corr and do_adj:
@@ -279,10 +275,7 @@ def main(data_model = 'spiral', seed = 12038,
     fix_phi = True
     cv_sample = 100 # number of hyperparameters to test
     cv_folds = 5
-    # tol = 1e-6
-    # cores = cores
     max_iter = 100
-    # max_iter = 50
     test_num = test_num
     nested_loop_verbose = True
 
@@ -327,6 +320,7 @@ def main(data_model = 'spiral', seed = 12038,
                 lkrr.memory_qn = 10
                 lkrr.do_corr = do_corr
                 lkrr.corr_type = do_adj # ignore if do_corr is False, since it is not possible to adjust the latent space without correction during CV
+                lkrr.corr_scale_error = corr_scale_error
 
                 log_reg = LogisticRegression()
                 rf_model = RandomForestClassifier(n_estimators=100, random_state=seed)
@@ -380,7 +374,7 @@ def main(data_model = 'spiral', seed = 12038,
                     print('X_train shape: ', X_train.shape)
                     print('X_test shape: ', X_test.shape)
 
-                if (not (0.2 < test_ratio < 0.8)) or (not (0.2 < test_ratio < 0.8)):
+                if (not (0.2 < test_ratio < 0.8)) or (not (0.2 < train_ratio < 0.8)):
                     continue
 
 
@@ -429,25 +423,8 @@ def main(data_model = 'spiral', seed = 12038,
                 if nested_loop_verbose:
                     # print('lkrr phi:', lkrr.phi )
                     print('lkrr (+phylo K) acc: ', lkrr_loss)
-                    
-                # print("inverse calculated:", lkrr.inv_calculated)
 
-                # if process == 'OU':
-                #     est_Rnn = R_u(vcv_train, lkrr.psc, center = False)
-                #     # est_alpha = np.exp(-lkrr.psc)
-                #     # guess_sigma2 = np.var(lkrr.f_curr)
-                #     # print("est_alpha: ", est_alpha, "guess_sigma2: ", guess_sigma2)
-                #     # A = np.diag(lkrr.Vu_func(lkrr.f_curr))
-                #     # print(A)
-                #     # working_R = ((2*est_alpha/guess_sigma2) * est_Rnn)  + A
-
-                #     working_R = est_Rnn                  
-                #     # lkrr.set_R_inv(R_u(vcv_train, lkrr.psc, center = False))  
-                #     lkrr.set_R_inv(working_R)  
-                # else:
-                #     lkrr.set_R_inv(vcv_train)
-
-                # print("inverse calculated:", lkrr.inv_calculated)
+        
                 lkrr.do_corr = True
                 lkrr_probs_corr = lkrr.predict_proba(X_test, vcv_test_12)
                 lkrr_loss_corr = np.mean((lkrr_probs_corr >= 0.5) == y_test)
@@ -514,6 +491,8 @@ if __name__ == "__main__":
     parser.add_argument('--folder_dir', '-f', type=str, default='.', help='Directory to save results (default: current directory)')
     parser.add_argument('--do_adj', type=str, choices=[None, 'convex', 'shrink'], default=None, help='Adjust latent space (default: None)')
     parser.add_argument('--do_corr', action='store_true', help='Do correction during CV (default: False)')
+    parser.add_argument('--corr_scale_error', type=str, choices=[None, 'std', 'n', 'neff'], default=None, help='Scale error for correction (default: n)')
+
     args = parser.parse_args()
 
     main(data_model=args.data_model, seed=args.seed,
@@ -525,7 +504,8 @@ if __name__ == "__main__":
           SW=args.SW,
           folder_dir=args.folder_dir,
           do_adj=args.do_adj,
-          do_corr=args.do_corr
+          do_corr=args.do_corr,
+          corr_scale_error=args.corr_scale_error
           )
 
 """
