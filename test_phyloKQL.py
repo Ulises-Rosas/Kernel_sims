@@ -491,7 +491,7 @@ if __name__ == "__main__":
     parser.add_argument('--folder_dir', '-f', type=str, default='.', help='Directory to save results (default: current directory)')
     parser.add_argument('--do_adj', type=str, choices=[None, 'convex', 'shrink'], default=None, help='Adjust latent space (default: None)')
     parser.add_argument('--do_corr', action='store_true', help='Do correction during CV (default: False)')
-    parser.add_argument('--corr_scale_error', type=str, choices=[None, 'std', 'n', 'neff'], default=None, help='Scale error for correction (default: n)')
+    parser.add_argument('--corr_scale_error', type=str, choices=[None, 'std', 'n', 'neff'], default='std', help='Scale error for correction (default: n)')
 
     args = parser.parse_args()
 
