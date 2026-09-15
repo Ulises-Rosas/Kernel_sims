@@ -239,7 +239,9 @@ def main(data_model = 'spiral', seed = 12038,
          use_qn = False, SW = [1,5,10], folder_dir = '.', 
          do_adj = False, # adjust the level of correction for the latent space,
          do_corr = False, # do correction during cv,
-         corr_scale_error = 'n' # divide error by the sample size. Options: [None, 'std', 'n', 'neff']
+         corr_scale_error = None, # divide error by the sample size. Options: [None, 'std', 'n', 'neff']
+         do_agop = True, # use average gradient outer product
+         agop_iter = 6, # number of iterations for the average gradient outer product
          ):
 
     if not do_corr and do_adj:
@@ -248,17 +250,27 @@ def main(data_model = 'spiral', seed = 12038,
 
     # # ref: Kernel methods in computational biology, pp. 62
     if not do_adj:
+        # params = {
+        #     'lam' : np.logspace(-5, 15, 100, base=2),
+        #     'gamma'  : np.logspace(-15, 3, 100, base=2),
+        # }
         params = {
-            'lam' : np.logspace(-5, 15, 100, base=2),
-            'gamma'  : np.logspace(-15, 3, 100, base=2),
+            'lam' : np.logspace(-10, 3, 100, base=2),
+            'gamma'  : np.logspace(-15, 4, 100, base=2),
         }
     else:
+        # params = {
+        #     'lam' : np.logspace(-5, 15, 100, base=2),
+        #     'gamma'  : np.logspace(-15, 3, 100, base=2),
+        #     # 'corr' : np.logspace(-10, 0, 100, base=2)
+        #     'corr' : np.logspace(-5, 0, 100, base=2)
+        # }
         params = {
-            'lam' : np.logspace(-5, 15, 100, base=2),
-            'gamma'  : np.logspace(-15, 3, 100, base=2),
+            'lam' : np.logspace(-10, 3, 100, base=2),
+            'gamma'  : np.logspace(-15, 4, 100, base=2),
             'corr' : np.logspace(-10, 0, 100, base=2)
             # 'corr' : np.logspace(-5, 0, 100, base=2)
-        }
+        }        
 
     with open(tree_file, 'r') as f: 
         tree = f.read().strip()
@@ -296,7 +308,7 @@ def main(data_model = 'spiral', seed = 12038,
     # C2 = [ 0.5 ]
 
     # c1_c2_str = "1.80 0.147"
-    # # c1_c2_str = "4.25 0.355"
+    # c1_c2_str = "1.32 0.131"
     # c1_c2 = c1_c2_str.strip().split()
     # C1 = [float(c1_c2[0])]
     # C2 = [float(c1_c2[1])]
@@ -321,6 +333,7 @@ def main(data_model = 'spiral', seed = 12038,
                 lkrr.do_corr = do_corr
                 lkrr.corr_type = do_adj # ignore if do_corr is False, since it is not possible to adjust the latent space without correction during CV
                 lkrr.corr_scale_error = corr_scale_error
+                lkrr.agop_iter = agop_iter
 
                 log_reg = LogisticRegression()
                 rf_model = RandomForestClassifier(n_estimators=100, random_state=seed)
@@ -387,7 +400,7 @@ def main(data_model = 'spiral', seed = 12038,
                 X_test -= X_train_offset
                 X_test /= X_train_scale
 
-
+                # lkrr.do_agop = do_agop
                 import time
                 start = time.time()
                 lkrr_best_params = k_fold_cv_weigthed(
@@ -409,7 +422,10 @@ def main(data_model = 'spiral', seed = 12038,
                 if nested_loop_verbose:
                     print('ADDITIVE APPROACH:')
 
+                lkrr.do_agop = do_agop
                 lkrr.fit(X_train, y_train, vcv_train)
+                # print('agop M:')
+                # print(lkrr.M)
 
                 if nested_loop_verbose:
                     print('alpha param:', np.exp(-lkrr.psc))
@@ -491,7 +507,9 @@ if __name__ == "__main__":
     parser.add_argument('--folder_dir', '-f', type=str, default='.', help='Directory to save results (default: current directory)')
     parser.add_argument('--do_adj', type=str, choices=[None, 'convex', 'shrink'], default=None, help='Adjust latent space (default: None)')
     parser.add_argument('--do_corr', action='store_true', help='Do correction during CV (default: False)')
-    parser.add_argument('--corr_scale_error', type=str, choices=[None, 'std', 'n', 'neff'], default='std', help='Scale error for correction (default: n)')
+    parser.add_argument('--corr_scale_error', type=str, choices=[None, 'std', 'n', 'neff', 'std_neff'], default=None, help='Scale error for correction (default: None)')
+    parser.add_argument('--do_agop', action='store_true', help='Use average gradient outer product (default: False)')
+    parser.add_argument('--agop_iter', type=int, default=6, help='Number of iterations for average gradient outer product (default: 6)')
 
     args = parser.parse_args()
 
@@ -505,8 +523,10 @@ if __name__ == "__main__":
           folder_dir=args.folder_dir,
           do_adj=args.do_adj,
           do_corr=args.do_corr,
-          corr_scale_error=args.corr_scale_error
-          )
+          corr_scale_error=args.corr_scale_error,
+          do_agop=args.do_agop,
+          agop_iter=args.agop_iter
+        )
 
 """
 time python test_phyloKQL.py --data_model circle2 --test_num 0.5\

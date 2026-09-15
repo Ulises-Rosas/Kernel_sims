@@ -252,8 +252,6 @@ def main(data_model = 'spiral', seed = 12038,
                 f.write(f"{leaf.name}\n")
 
     
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run data simulation.')
     parser.add_argument('--data_model', type=str, default='spiral', help='Data model to use (default: spiral)')
@@ -269,8 +267,6 @@ if __name__ == "__main__":
     parser.add_argument('--folder_dir', '-f', type=str, default='.', help='Directory to save results (default: current directory)')
     args = parser.parse_args()
 
-
-
     main(data_model = args.data_model, seed = args.seed, 
          test_num = args.test_num, ID = args.ID, M1 = args.M1, M2 = args.M2, 
          tree_file = args.tree_file, process = args.process, data_process = args.data_process,
@@ -281,40 +277,3 @@ python sim_data.py --data_model circle2 --seed 12038 --test_num 0.5\
     --tree_file test_tree_v7.txt --ID circle_data --M1 1 --M2 1\
     --process OU --data_process BM --SW 1 --folder_dir out_dir
 """
-
-
-# region: old code
-                # lkrgee = Logistic(get_corr = False, tol = tol, 
-                #                 max_iter = max_iter, kernel = 'rbf', 
-                #                 verbose = True,
-                #                 fix_phi = fix_phi)
-                # lkrgee.process = process
-
-                # import time
-                # start = time.time()
-                # lkrgee_best_params = k_fold_cv_weigthed(
-                #     X_train, y_train, vcv_train,
-                #     lkrgee,  W[train_idx], params,
-                #     folds=cv_folds,
-                #     sample=cv_sample, 
-                #     verbose=not False, 
-                #     seed=seed
-                # )
-                # # print(W[train_idx])
-                # if nested_loop_verbose:
-                #     print('lkrgee CV Time: ', time.time() - start)
-                #     print('lkrgee best params: ', lkrgee_best_params)
-
-                # lkrgee.set_params(**lkrgee_best_params)
-                # lkrgee.fit(X_train, y_train, vcv_train)
-
-                # lkrgee_loss = np.mean(lkrgee.predict(X_test, vcv_test_12) == y_test)
-                # lkrgee_loss_nc = np.mean(lkrgee.predict(X_test, None) == y_test)
-
-                # if nested_loop_verbose:
-                #     print('alpha param:', np.exp(-lkrgee.psc))
-                #     print('signal (meaningless if process is not OU):',lkrgee.psc)
-
-                    # print('lkrgee acc: ', lkrgee_loss_nc)
-                    # print('lkrgee acc (corr.): ', lkrgee_loss)
-# endregion: old code
