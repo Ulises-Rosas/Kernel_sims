@@ -544,7 +544,7 @@ if __name__ == "__main__":
     parser.add_argument('--corr_scale_error', type=str, choices=[None, 'std', 'n', 'neff', 'std_neff'], default=None, help='Scale error for correction (default: None)')
     parser.add_argument('--do_agop', action='store_true', help='Use average gradient outer product (default: False)')
     parser.add_argument('--agop_diag', action='store_true', help='Use diagonal approximation for average gradient outer product (default: False)')
-    parser.add_argument('--agop_iter', type=int, default=6, help='Number of iterations for average gradient outer product (default: 6)')
+    parser.add_argument('--agop_iter', type=int, default=5, help='Number of iterations for average gradient outer product (default: 6)')
 
     args = parser.parse_args()
 
