@@ -6,7 +6,8 @@ import argparse
 from phylokrr_dev.alpha_beta_weighting import (alpha_weighting, 
                                                split_data_idx)
 from phylokrr_dev.block_cross_validation import k_fold_cv_weigthed
-from phylokrr_dev.phyloKPQL import Logistic
+# from phylokrr_dev.phyloKPQL import Logistic
+from phylokrr_dev.phyloK import Logistic
 
 from phylokrr.treeio import (parseNewickTree, 
                              is_leaf, get_adj, get_C, 
@@ -172,6 +173,30 @@ def simulate_data(D, root, leaves, adj, C,
         # print('bias: ', b)
         eta = 1.25 - np.sqrt(X[:, 0]**2 + w * X[:, 1]**2) + b + e
 
+    elif data_model == '5-sphere':
+        # 5d-sphere
+        X = rng.multivariate_normal(np.zeros(n), V, 10).T        
+        b = -0.5 if bias is None else bias
+        eta = 1 - 0.5*np.sqrt(X[:, 0]**2 + X[:, 1]**2 + X[:, 2]**2 + X[:, 3]**2 + X[:, 4]**2) + b + e
+
+    elif data_model == '20-sphere':
+        # 20d-sphere
+        X = rng.multivariate_normal(np.zeros(n), V, 20).T        
+        b = -0.5 if bias is None else bias
+        eta = 1 - 0.1*np.sqrt(np.sum(X**2, axis=1)) + b + e
+
+    elif data_model == '20-sphere_':
+        # 20d-sphere
+        X = rng.multivariate_normal(np.zeros(n), V, 20).T        
+        b = -0.5 if bias is None else bias
+        eta = 1 - 0.1*np.sqrt(np.sum(X**2, axis=1)) + b + e
+
+    elif data_model == 'friedman':
+        # Friedman function
+        X = rng.multivariate_normal(np.zeros(n), V, 10).T
+        b = -0.5 if bias is None else bias
+        eta = 10*np.sin(np.pi*X[:, 0]*X[:, 1]) + 20*(X[:, 2] - 0.5)**2 + 10*X[:, 3] + 5*X[:, 4] + b + e
+
     elif data_model == 'linear':
         # linear pattern
         b = -0.6 if bias is None else bias
@@ -242,6 +267,7 @@ def main(data_model = 'spiral', seed = 12038,
          corr_scale_error = None, # divide error by the sample size. Options: [None, 'std', 'n', 'neff']
          do_agop = True, # use average gradient outer product
          agop_iter = 6, # number of iterations for the average gradient outer product
+         agop_diag = False, # use diagonal approximation for the average gradient outer product
          ):
 
     if not do_corr and do_adj:
@@ -325,11 +351,10 @@ def main(data_model = 'spiral', seed = 12038,
                 lkrr = Logistic(get_corr= False, tol=tol, 
                                 max_iter=max_iter, kernel='rbf', 
                                 verbose=not False, 
-                                fix_phi = fix_phi, 
-                                add_extraK=True)  
+                                fix_phi = fix_phi)  
+                lkrr.add_extraK = True # backward compatibility with previous versions of phyloKQL
                 lkrr.process = process
                 lkrr.use_quasi_newton = use_qn
-                lkrr.memory_qn = 10
                 lkrr.do_corr = do_corr
                 lkrr.corr_type = do_adj # ignore if do_corr is False, since it is not possible to adjust the latent space without correction during CV
                 lkrr.corr_scale_error = corr_scale_error
@@ -376,6 +401,11 @@ def main(data_model = 'spiral', seed = 12038,
                 vcv_train = R[train_idx,:][:,train_idx]
                 vcv_test_12 = R[test_idx,:][:,train_idx]
 
+                # this keeps time complexity 
+                # bellow n^2, but still adaptive enough
+                lkrr.memory_qn = np.sqrt(X_train.shape[0]).astype(int)
+                # lkrr.memory_qn = X_train.shape[0]
+
                 test_ratio =  np.sum(y_test == 1)/len(y_test)
                 train_ratio = np.sum(y_train == 1)/len(y_train)
 
@@ -400,6 +430,9 @@ def main(data_model = 'spiral', seed = 12038,
                 X_test -= X_train_offset
                 X_test /= X_train_scale
 
+                # X_train /= np.linalg.norm(X_train, axis=-1).reshape(-1, 1)
+                # X_test /= np.linalg.norm(X_test, axis=-1).reshape(-1, 1)
+
                 # lkrr.do_agop = do_agop
                 import time
                 start = time.time()
@@ -422,10 +455,11 @@ def main(data_model = 'spiral', seed = 12038,
                 if nested_loop_verbose:
                     print('ADDITIVE APPROACH:')
 
-                lkrr.do_agop = do_agop
+                lkrr.do_agop = do_agop # only applied when we know the hyperparameters.
+                lkrr.agop_diag = agop_diag 
                 lkrr.fit(X_train, y_train, vcv_train)
-                # print('agop M:')
-                # print(lkrr.M)
+                print('agop M:')
+                print(lkrr.M)
 
                 if nested_loop_verbose:
                     print('alpha param:', np.exp(-lkrr.psc))
@@ -509,6 +543,7 @@ if __name__ == "__main__":
     parser.add_argument('--do_corr', action='store_true', help='Do correction during CV (default: False)')
     parser.add_argument('--corr_scale_error', type=str, choices=[None, 'std', 'n', 'neff', 'std_neff'], default=None, help='Scale error for correction (default: None)')
     parser.add_argument('--do_agop', action='store_true', help='Use average gradient outer product (default: False)')
+    parser.add_argument('--agop_diag', action='store_true', help='Use diagonal approximation for average gradient outer product (default: False)')
     parser.add_argument('--agop_iter', type=int, default=6, help='Number of iterations for average gradient outer product (default: 6)')
 
     args = parser.parse_args()
@@ -525,6 +560,7 @@ if __name__ == "__main__":
           do_corr=args.do_corr,
           corr_scale_error=args.corr_scale_error,
           do_agop=args.do_agop,
+          agop_diag=args.agop_diag,
           agop_iter=args.agop_iter
         )
 
@@ -538,40 +574,3 @@ python test_phyloKQL.py --data_model circle2\
                 --M1 1.0 --M2 1.0 --ID 1kspps_armijo_BM\
                 --tree_file test_tree_v7.txt -p 'BM'    
 """
-
-
-# region: old code
-                # lkrgee = Logistic(get_corr = False, tol = tol, 
-                #                 max_iter = max_iter, kernel = 'rbf', 
-                #                 verbose = True,
-                #                 fix_phi = fix_phi)
-                # lkrgee.process = process
-
-                # import time
-                # start = time.time()
-                # lkrgee_best_params = k_fold_cv_weigthed(
-                #     X_train, y_train, vcv_train,
-                #     lkrgee,  W[train_idx], params,
-                #     folds=cv_folds,
-                #     sample=cv_sample, 
-                #     verbose=not False, 
-                #     seed=seed
-                # )
-                # # print(W[train_idx])
-                # if nested_loop_verbose:
-                #     print('lkrgee CV Time: ', time.time() - start)
-                #     print('lkrgee best params: ', lkrgee_best_params)
-
-                # lkrgee.set_params(**lkrgee_best_params)
-                # lkrgee.fit(X_train, y_train, vcv_train)
-
-                # lkrgee_loss = np.mean(lkrgee.predict(X_test, vcv_test_12) == y_test)
-                # lkrgee_loss_nc = np.mean(lkrgee.predict(X_test, None) == y_test)
-
-                # if nested_loop_verbose:
-                #     print('alpha param:', np.exp(-lkrgee.psc))
-                #     print('signal (meaningless if process is not OU):',lkrgee.psc)
-
-                    # print('lkrgee acc: ', lkrgee_loss_nc)
-                    # print('lkrgee acc (corr.): ', lkrgee_loss)
-# endregion: old code
