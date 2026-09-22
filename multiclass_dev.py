@@ -137,6 +137,7 @@ class PhyloKernel:
     def get_params(self):
         return  {'max_iter': self.max_iter, 
                 'lam': self.lam, 
+                'seed': self.seed,
                 'intercept': self.alpha[0] if len(self.alpha) > 0 else None, 
                 'tol': self.tol}
 
@@ -408,7 +409,7 @@ class PhyloKernel:
         K_a = np.ascontiguousarray(K_a, dtype=K_dtype)
 
         if not self.warm_start or np.any(np.isnan(self.alpha)):
-            self.alpha = np.zeros( m * (p + 1) ) # alpha weights
+            self.alpha = np.zeros( m * (p + 1) )
             self.alpha = np.ascontiguousarray(self.alpha, dtype=K_dtype)
             self.phi = 1
 
@@ -417,9 +418,7 @@ class PhyloKernel:
         def nabla_f(w_a: np.ndarray) -> np.ndarray:
             # w_a = self.alpha
 
-            w_a = w_a.reshape(p + 1, m, order='F')
-            y_b = y.reshape(n, m, order='F')
-
+            w_a = w_a.reshape(p + 1, m, order='F') # w matrix
             f_curr = K_a @ w_a
             # get derivatives of \mu and \mu
             Du, u = self.get_Du(f_curr)
@@ -429,14 +428,14 @@ class PhyloKernel:
 
             for k in range(m):
                 # k = 0
-                DuDa = Du[:,k][:,None] * K_a # O(n^2)
+                DuDa = Du[:,k][:, None] * K_a # O(n^2)
                 # print("V_Inv shape: ", V_Inv.shape)
                 DuDaT_V = DuDa.T * V_Inv[:,k] # O(n^2)
 
                 # gradient
-                g[:,k] = (-1/(n*m))*(DuDaT_V @ (y_b[:,k] - u[:,k])) + lK_0 @ w_a[:,k] # O(n^2)
-
-            return g.ravel(order = 'F')
+                g[:,k] = (-1./(n*m))*( DuDaT_V @ (y[:,k] - u[:,k]) ) + lK_0 @ w_a[:,k] # O(n^2)
+            
+            return g.ravel(order='F')
 
             
         def f(w_a: np.ndarray) -> float:
@@ -446,227 +445,68 @@ class PhyloKernel:
             # pe = (self.lam/2.) * (w_a[1:].T @ K_a[:, 1:] @ w_a[1:])
             # obj =  self.Obj(y, f_curr, p = pe)
 
-            w_a = w_a.reshape(p + 1, m, order='F') # w matrix
-            y_b = y.reshape(n, m, order='F') # big y, it does do anything if it is already in the right shape
+            w_a = w_a.reshape(p + 1, m, order='F')
             f_curr = K_a @ w_a
     
-            suma = 0
+            suma = 0.0
             for k in range(m):
                 suma += (self.lam/2.) * (w_a[1:, k].T @ K_a[:, 1:] @ w_a[1:, k])
 
-            obj = self.Obj(y_b, f_curr, suma)
+            obj = self.Obj(y, f_curr, suma)
             return obj
 
-        # O(n^2) complexity mostly due to nabla_f and f evaluations
-        # the optimization itself is O(nm) where m is the history size of the L-BFGS-B algorithm
-        # by default m = 10, so the overall complexity is O(n^2)
-        result = minimize(
-                    fun=f, 
-                    x0=self.alpha, 
-                    method='L-BFGS-B',
-                    # method='BFGS',
-                    tol = self.tol,
-                    options={'maxiter': self.max_iter, 
-                             'maxcor': self.memory_qn,
-                               },
-                    jac=nabla_f,
-                )
+        # O(mn^2) complexity mostly due to nabla_f and f evaluations
+        # where m is the number of classes and n is the number of samples.
+        # the optimization itself is O(qnm) where q is the history size of the L-BFGS-B algorithm
+        # by default m = 10, so the overall complexity is O(mn^2)
+        if self.verbose:
+            print('Initial alpha: ', self.alpha[:4])
+            print(f"Starting {self.solver} optimization with max_iter={self.max_iter}, tol={self.tol}, memory_qn={self.memory_qn}")
+        if self.solver == 'L-BFGS-B':
+            result = minimize(
+                        fun=f, 
+                        method='L-BFGS-B',
+                        x0=self.alpha,
+                        tol = self.tol,
+                        options={'maxiter': self.max_iter, 
+                                 'maxcor': self.memory_qn,
+                                 'maxls': 50,   
+                                 'gtol': self.tol,
+                                },
+                        jac=nabla_f,
+                    )
+        else:
+            # O(n^2) complexity mostly due to nabla_f and f evaluations
+            # the optimization itself is O((n*m)^2) 
+            result = minimize(
+                        fun=f, 
+                        x0=self.alpha, 
+                        method='BFGS',
+                        tol = self.tol,
+                        options={ 
+                            'maxiter': self.max_iter,
+                            'maxls': 50,   
+                            'gtol': self.tol,
+                            },
+                        jac=nabla_f,
+                    )
 
-        # O(n^2) complexity mostly due to nabla_f and f evaluations
-        # the optimization itself is O(n^2) 
-        # result = minimize(
-        #             fun=f, 
-        #             x0=self.alpha, 
-        #             # method='L-BFGS-B',
-        #             method='BFGS',
-        #             tol = self.tol,
-        #             options={ 'maxiter': self.max_iter },
-        #             jac=nabla_f,
-        #         )
-        
         conv = result.nit <= self.max_iter and result.success
         self.alpha = result.x
-        self.f_curr = K_a @ self.alpha
+        self.f_curr = K_a @ self.alpha.reshape(p + 1, m, order='F')
+
+        if self.verbose:
+            print(result)
+            print(self.mu(self.f_curr)[:4,:])
+            print(y[:4,:])
+
         self.y = y.copy()
 
         if not conv:
             print(f"{RED}No convergence for weights after %i iterations {RESET}" % result.nit)
             print(f"{RED}gamma, phi, lam:, {self.gamma}, {self.phi}, {self.lam}{RESET}")
             print(f"{RED}first 4 weights: {self.alpha[:4]}{RESET}")
-    # endregion
-
-    # region: Newton-Raphson optimization
-    def opt_weights(self, K, y, Kx = None):
-
-        self.verbose = True
-
-        n = y.shape[0]
-        p = K.shape[1] if K is not None else 0
-        K_dtype = K.dtype if K is not None else float
-
-        ones = np.ones(n, dtype=K_dtype)
-        
-        if p > 0:
-            K_0 = np.zeros((n + 1, p + 1), dtype=K_dtype)
-            K_x = K if Kx is None else Kx
-            K_0[1:, 1:] = K_x
-            lK_0 = self.lam * K_0
-
-        else:
-            lK_0 = np.array([[0]], dtype=K_dtype)
-
-
-        # concatenate ones to K for intercept
-        K_a = np.column_stack((ones, K)) if p > 0 else ones.reshape(-1, 1)
-        K_a = np.ascontiguousarray(K_a, dtype=K_dtype)
-
-        if not self.warm_start or np.any(np.isnan(self.alpha)):
-            self.alpha = np.zeros(p + 1) # alpha weights
-            self.alpha = np.ascontiguousarray(self.alpha, dtype=K_dtype)
-            self.phi = 1
-
-        assert len(self.alpha) > 0, "The model needs to be fitted first"
-
-        def get_grad_Hessian(f_curr, w_a):
-            # get derivatives of \mu and \mu
-            Du, u = self.get_Du(f_curr)
-            V_Inv = self.get_V_Inv(f_curr) # O(n^2)
-    
-            DuDa = Du[:,None] * K_a # O(n^2)
-
-            # V_inv is diagonal
-            # DuDaT_V = DuDa.T * np.diag(V_Inv) # O(n^2)
-            DuDaT_V = DuDa.T * V_Inv # O(n^2)
-
-            self.r = y - u # O(n)
-
-            # gradient
-            g =  (-1/n)*(DuDaT_V @ self.r) + lK_0 @ w_a # O(n^2)
-            DuDaT_V_DuDa = np.matmul(DuDaT_V, DuDa) # O(n^3)
-            H = (1/n)*(DuDaT_V_DuDa) + lK_0 # O(n^2)
-            return H, g
-
-        f_curr = K_a @ self.alpha
-        conv = False
-        for i in range(self.max_iter):
-
-            H, G = get_grad_Hessian(f_curr, self.alpha)
-            try:
-                d = - np.linalg.solve( H, G ) # O(n^3)
-
-            except np.linalg.LinAlgError:
-                print("Linear algebra error occurred at solve. Adding hessian_tol to the diagonal of H and trying again.")
-                d =  - np.linalg.solve( H + 1e-5 * np.eye(H.shape[0]), G ) # O(n^3)
-
-            lam_sq = newton_raphson_step_v2(
-                y, d, G, K_a, K_x, self.alpha,
-                f = self.Obj, lam=self.lam
-            )
-    
-            # new optimal function val
-            f_new = K_a @ self.alpha
-            # curr_acc = np.mean((self.mu(f_new) >= 0.5) == y)
-            # print(f"Iter {i + 1}: curr_acc: {curr_acc}, lam_sq: {lam_sq}")
-            if self.check_convergence(f_new, f_curr, 
-                                      g_norm = np.linalg.norm(G, ord=2), 
-                                      lam2 = lam_sq, 
-                                      i = i+1):
-                # print(f"Converge for alpha (iter. {i + 1})")
-                conv = True
-                f_curr = f_new
-                break
-
-            f_curr = f_new
-
-            if self._verbose:
-                print("Iteration: ", i)
-                print('phi: ', self.phi)
-                print('fix_phi: ', self.fix_phi)
-                print()
-        
-        self.f_curr = f_curr
-        self.y = y.copy()
-
-        if not conv:
-            print(f"{RED}No convergence after %i iterations {RESET}" % self.max_iter)
-            print("gamma, phi, lam:")
-            print(self.gamma, self.phi, self.lam)
-
-    def opt_rij_gd_fullK(self, y, T, Kx, uc = 1):
-        """
-        Optimize the phylogenetic correlation parameter using gradient descent
-        """
-        n = y.shape[0]
-        w = self.alpha[1:]
-        bias = self.alpha[0]
-
-        def grad_Hessian_wrt_u(u_curr):
-            R_uc, dR_uc, ddR_uc = self.R_dR_ddR_uc(u_curr, T)
-
-            ddR = simple_centerK(ddR_uc)
-            dR = simple_centerK(dR_uc)
-            R = simple_centerK(R_uc)
-                        
-            f_w = (Kx + R) @ w
-            f_curr = f_w + bias
-
-            Du, u   = self.get_Du(f_curr)
-            V_Inv   = self.get_V_Inv(f_curr)
-            DuDa    = (Du[:,None] * dR) @ w
-            DuDaT_V = DuDa.T * V_Inv # O(n^2)
-
-
-            dp1 = (self.lam/2.) * (w.T @ dR @ w)
-            dp2 = (self.lam/2.) * (w.T @ ddR @ w)
-            g = -(1/n)*(DuDaT_V @ (y - u)) + dp1
-            H  = (1/n)*(DuDaT_V @ DuDa) + dp2
-
-            p = (self.lam/2.) * (w.T @ f_w)
-            obj = self.Obj(y, f_curr, p)
-
-            return g, H, obj
-
-        u_curr = uc
-        conv = False
-        for i in range(self.max_iter):
-            g, H, curr_obj = grad_Hessian_wrt_u(u_curr)
-
-            d = -g/H if H > 0.0 else -g
-            g_d = g * d
-            lam_sq = -g_d
-
-            step = backtracking_line_search_rij(
-                y,  self.alpha, u_curr, T, Kx, d, g_d, 
-                dist = self.reg, phi = self.phi, lam=self.lam
-            )
-            u_new = u_curr + (step*d)
-
-            u_new = np.clip(u_new, -4.0, 4.0)  # Clip u_new to avoid extreme values
-            if H <= 0.0:
-                f_w_new = (Kx + R_u(T, u_new)) @ w
-                new_obj = self.Obj(y, f_w_new + bias, (self.lam/2.) * (w.T @ f_w_new))
-                lam_sq = 2*(curr_obj - new_obj)
-
-            # print(f"Iter{i + 1}  ===== g: %f, H: %f, H^-1: %f, d: %f, u_curr: {u_curr}, u_new: {u_new}, alpha: {np.exp(-u_curr)}" %(g, H, H**(-1), d))
-            if self.check_convergence(u_new, u_curr, 
-                                      g_norm = np.abs(g), 
-                                      lam2 = lam_sq,
-                                      i = i + 1):
-                if self.verbose:
-                    print(f"Converge for r (iter. {i + 1})")
-                    # print("---- CURR OBJ:", curr_obj)
-                conv = True
-                self.psc = u_new
-                break
-
-            u_curr = u_new
-
-        if not conv:
-            print(f"{RED}No convergence after %i iterations, curr. alpha %f {RESET}" % (self.max_iter, np.exp(-u_curr)))
-            print(f"grad: %f, Hessian: %f, H^-1: %f, u_curr: {u_curr}, alpha: {np.exp(-u_curr)}" %(g, H, H**(-1)))
-            # print(f"{RED}curr. alpha : {np.exp(-u_curr)}{RESET}")
-
-        self.psc = u_curr
+            
     # endregion
 
     def mu(self, f):
@@ -691,18 +531,9 @@ class PhyloKernel:
 
         K_x: if it is None, then self.K_train is used for penalization term
         """
-        # f_wa = self.K_train @ self.alpha[1:]
-        # f_curr = f_wa + self.alpha[0]
-        # if K_x is not None:
-        #     p = (self.lam/2.) * (self.alpha[1:].T @ K_x @ self.alpha[1:])
-        # else:
-        #     p = (self.lam/2.) * (self.alpha[1:].T @ f_wa)
-        # return self.Obj(y, f_curr, p = p)
-
 
         n,m = self.get_dims(y)
         w_a = self.alpha.reshape(n + 1, m, order='F')
-        y_b = y.reshape(n, m, order='F')
 
         f_wa = self.K_train @ w_a[1:,:]
         f_curr = f_wa + w_a[0,:]
@@ -711,14 +542,12 @@ class PhyloKernel:
             suma = 0.0
             for k in range(m):
                 suma += (self.lam/2.) * (w_a[1:, k].T @ K_x @ w_a[1:, k])
-            # p = (self.lam/2.) * (self.alpha[1:].T @ K_x @ self.alpha[1:])
         else:
             suma = 0.0
             for k in range(m):
                 suma += (self.lam/2.) * (w_a[1:, k].T @ f_wa[:, k])
-            # p = (self.lam/2.) * (self.alpha[1:].T @ f_wa)
 
-        return self.Obj(y_b, f_curr, p = suma)
+        return self.Obj(y, f_curr, p = suma)
 
     def update_K_train(self, u_new, T, K_x_uc):
         """
@@ -727,7 +556,12 @@ class PhyloKernel:
         self.Rnn = R_u(T, u_new, center = False)
         # # print("Rnn at update K_train")
         # # print(self.Rnn[0:3, 0:3])
-        K_uc = K_x_uc + self.Rnn
+        if self.reg == 'multinomial':
+            K_uc = K_x_uc 
+            # print(self.Rnn[0:3, 0:3])
+        else:
+            K_uc = K_x_uc + self.Rnn
+
         K_row_mean = np.mean(K_uc, axis=1)
         self.K_col_mean = np.mean(K_uc, axis=0)
         self.K_all_mean = np.mean(K_uc)
@@ -737,16 +571,11 @@ class PhyloKernel:
 
     # region: alternating optimization
     def step_fullK_opt(self, y, K_x, K_x_uc, vcv):
-        
-        if self.use_quasi_newton:
 
-            self.opt_weights_QN(self.K_train, y)
+        self.opt_weights_QN(self.K_train, y)
+        if self.reg != 'multinomial':
             self.opt_rij_QN(y, T = vcv, Kx = K_x, uc = self.psc)
             
-        else:
-            self.opt_weights(self.K_train, y, Kx = None)
-            self.opt_rij_gd_fullK(y, T = vcv, Kx = K_x, uc = self.psc)
-
         self.update_K_train(u_new = self.psc, T = vcv, K_x_uc = K_x_uc)
     
 
@@ -775,6 +604,8 @@ class PhyloKernel:
             new_sig = self.psc
 
             lam_sq = 2*abs(curr_score - new_score)/max([abs(curr_score), abs(new_score), 1]) # a la scipy.minimize tol
+            if self.verbose:
+                print(f"iter: {i + 1}, phylo u: {self.psc}, lam_sq: {lam_sq}, new score: {new_score}, old score: {curr_score}, alpha: {np.exp(-self.psc)}")
             if  self.check_convergence(new_sig, curr_sig, 
                                       g_norm=self.grad_tol*2, 
                                       lam2=lam_sq, 
@@ -827,6 +658,8 @@ class PhyloKernel:
             assert np.all(np.diag(vcv) == 0.0),\
                     "OU needs path length matrix as input"
 
+            n,m = self.get_dims(y)
+            y = y.reshape(n, m, order='F')
             self.fullK_opt(y, X, vcv)
 
         elif self.process == 'none':
@@ -1253,7 +1086,6 @@ class Multinomial(PhyloKernel):
                           copy_R_inv=copy_R_inv,copy_K_train= copy_K_train, fix_phi=fix_phi)
 
         self.reg = 'multinomial'
-        self.use_quasi_newton = True
         
         self.grad_tol = 1e-10
         # latent bounds
@@ -1272,6 +1104,7 @@ class Multinomial(PhyloKernel):
         # f_tresh = 10
         # f_tresh = -np.log10(self.grad_tol)
         # f  = np.random.normal(1, 1, size = (3, 4))
+        # f = self.K_train @ self.alpha.reshape(n + 1,m, order = "F")[1:,:]
 
         f = np.clip(f, self.lb, self.ub)
         exp_f = np.exp(f - f.max(axis=1, keepdims=True))  # for numerical stability
