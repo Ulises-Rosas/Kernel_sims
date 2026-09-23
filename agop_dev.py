@@ -80,10 +80,13 @@ def agop(Du, mu, Vu, y, W, lam, X, K, M, gamma, diag = False):
     # self = lkrr
     # y = lkrr.y
     # diag = True
+    # y =  np.random.normal(size = (10,1))
 
     mn = y.shape
+    d1_array = False
     if len(mn) == 1:
         n,m = (mn[0], 1)
+        d1_array = True
 
     else:
         n,m = mn
@@ -91,13 +94,12 @@ def agop(Du, mu, Vu, y, W, lam, X, K, M, gamma, diag = False):
     # Du, mu = self.get_Du_mu_internal(f_curr) # O(nm)
     # Vu = self.get_Vu_func(f_curr) # O(nm)
     # yb = y.reshape(n, m, order='F') # O(nm)
-
     e = y - mu # O(nm)
     e /= Vu
 
-    if m == 1:
-        e  = e[:, np.newaxis]
-        W  = W[:, np.newaxis]
+    if d1_array:
+        e  = e[ :, np.newaxis]
+        W  = W[ :, np.newaxis]
         Du = Du[:, np.newaxis]
 
     c1 = m*n
@@ -107,7 +109,7 @@ def agop(Du, mu, Vu, y, W, lam, X, K, M, gamma, diag = False):
         nabla_f_l = np.zeros(X.shape[1])
         # O(p^2m + pnm) or O(pnm) if diag = True
         for j in range(m):
-            d = (-1/c1) * Du[l,j] * e[l,j] + (lam/2) * W[l,j]
+            d = (-1/c1) * Du[l,j] * e[l,j] + (lam/2.) * W[l,j]
             # O(p^2 + pn) or O(pn) if diag = True
             tmp = nabla_kw(l, K, X, M, gamma, W[:,j], diag=diag) * d
             # print("tmp: ",tmp)
