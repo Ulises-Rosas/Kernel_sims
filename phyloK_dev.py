@@ -1,13 +1,12 @@
 import numpy as np
 from numpy import linalg as la
 
-from phylokrr_dev.opt import (newton_raphson_step, R_u, backtracking_line_search_rij)
+from phylokrr_dev.opt import (newton_raphson_step_v2, R_u, backtracking_line_search_rij)
 from phylokrr_dev.agop import agop, RBF_kernel
+# from agop_dev import agop, RBF_kernel
 from phylokrr.kernels import linear_kernel
 
-
 from scipy.optimize import minimize
-
 
 RED = "\033[31m"
 RESET = "\033[0m"
@@ -328,7 +327,7 @@ class PhyloKernel:
         ddR_uc = ( alpha_u * T  - np.ones(T.shape) ) * dR_uc
         return R_uc, dR_uc, ddR_uc
 
-    # region: quasi-newton optimization
+    # region: Quasi-newton optimization
     def opt_rij_QN(self, y, T, Kx, uc = 1):
         """
         Optimize the phylogenetic correlation parameter using gradient descent
@@ -378,14 +377,18 @@ class PhyloKernel:
             print(f"{RED}No convergence after %i iterations {RESET}" % self.max_iter)
             print(f"curr. alpha: {np.exp(-self.psc)}")
 
-    def opt_weights_QN(self, K, y):
-        # K = self.K_train
+    def get_dims(self, y):
         nm = y.shape
         if len(nm) == 1:
             n = nm[0]
             m = 1
         else:
-            n, m = nm
+            n, m = nm            
+        return n, m
+
+    def opt_weights_QN(self, K, y):
+        # K = self.K_train
+        n, m = self.get_dims(y)
 
         p = K.shape[1] if K is not None else 0
         K_dtype = K.dtype if K is not None else float
@@ -406,7 +409,7 @@ class PhyloKernel:
         K_a = np.ascontiguousarray(K_a, dtype=K_dtype)
 
         if not self.warm_start or np.any(np.isnan(self.alpha)):
-            self.alpha = np.zeros(m*(p + 1)) # alpha weights
+            self.alpha = np.zeros( m * (p + 1) ) # alpha weights
             self.alpha = np.ascontiguousarray(self.alpha, dtype=K_dtype)
             self.phi = 1
 
@@ -438,9 +441,22 @@ class PhyloKernel:
 
             
         def f(w_a: np.ndarray) -> float:
+            # w_a = self.alpha
+
+            # f_curr = K_a @ w_a
+            # pe = (self.lam/2.) * (w_a[1:].T @ K_a[:, 1:] @ w_a[1:])
+            # obj =  self.Obj(y, f_curr, p = pe)
+
+            w_a = w_a.reshape(p + 1, m, order='F') # w matrix
+            y_b = y.reshape(n, m, order='F') # big y, it does do anything if it is already in the right shape
             f_curr = K_a @ w_a
-            p = (self.lam/2.) * (w_a[1:].T @ K_a[:,1:] @ w_a[1:])
-            return self.Obj(y, f_curr, p = p)
+    
+            suma = 0
+            for k in range(m):
+                suma += (self.lam/2.) * (w_a[1:, k].T @ K_a[:, 1:] @ w_a[1:, k])
+
+            obj = self.Obj(y_b, f_curr, suma)
+            return obj
 
         # O(n^2) complexity mostly due to nabla_f and f evaluations
         # the optimization itself is O(nm) where m is the history size of the L-BFGS-B algorithm
@@ -453,6 +469,8 @@ class PhyloKernel:
                     tol = self.tol,
                     options={'maxiter': self.max_iter, 
                              'maxcor': self.memory_qn,
+                             'maxls': 50,  
+                             'gtol': self.tol,  
                                },
                     jac=nabla_f,
                 )
@@ -536,21 +554,26 @@ class PhyloKernel:
         for i in range(self.max_iter):
 
             H, G = get_grad_Hessian(f_curr, self.alpha)
-            lam_sq = newton_raphson_step(
-                y, H, G, K_a, K_x, self.alpha, self.hessian_tol,
-                dist=self.reg, phi = self.phi, lam=self.lam
+            try:
+                d = - np.linalg.solve( H, G ) # O(n^3)
+
+            except np.linalg.LinAlgError:
+                print("Linear algebra error occurred at solve. Adding hessian_tol to the diagonal of H and trying again.")
+                d =  - np.linalg.solve( H + 1e-5 * np.eye(H.shape[0]), G ) # O(n^3)
+
+            lam_sq = newton_raphson_step_v2(
+                y, d, G, K_a, K_x, self.alpha,
+                f = self.Obj, lam=self.lam
             )
-            
-            # self.alpha += -np.linalg.solve(H, G)  # Newton-Raphson update
     
             # new optimal function val
             f_new = K_a @ self.alpha
-            curr_acc = np.mean((self.mu(f_new) >= 0.5) == y)
+            # curr_acc = np.mean((self.mu(f_new) >= 0.5) == y)
             # print(f"Iter {i + 1}: curr_acc: {curr_acc}, lam_sq: {lam_sq}")
             if self.check_convergence(f_new, f_curr, 
                                       g_norm = np.linalg.norm(G, ord=2), 
                                       lam2 = lam_sq, 
-                                      i = i):
+                                      i = i+1):
                 # print(f"Converge for alpha (iter. {i + 1})")
                 conv = True
                 f_curr = f_new
@@ -656,7 +679,7 @@ class PhyloKernel:
         return (1/self.phi) * -0.5 * (y - u)**2
 
     def Obj(self, y, f, p):
-
+        # f = f_curr
         u = self.mu(f)
         return - np.mean(self.Q(y, u)) + p
 
@@ -671,15 +694,34 @@ class PhyloKernel:
 
         K_x: if it is None, then self.K_train is used for penalization term
         """
-        f_wa = self.K_train @ self.alpha[1:]
-        f_curr = f_wa + self.alpha[0]
+        # f_wa = self.K_train @ self.alpha[1:]
+        # f_curr = f_wa + self.alpha[0]
+        # if K_x is not None:
+        #     p = (self.lam/2.) * (self.alpha[1:].T @ K_x @ self.alpha[1:])
+        # else:
+        #     p = (self.lam/2.) * (self.alpha[1:].T @ f_wa)
+        # return self.Obj(y, f_curr, p = p)
+
+
+        n,m = self.get_dims(y)
+        w_a = self.alpha.reshape(n + 1, m, order='F')
+        y_b = y.reshape(n, m, order='F')
+
+        f_wa = self.K_train @ w_a[1:,:]
+        f_curr = f_wa + w_a[0,:]
 
         if K_x is not None:
-            p = (self.lam/2.) * (self.alpha[1:].T @ K_x @ self.alpha[1:])
+            suma = 0.0
+            for k in range(m):
+                suma += (self.lam/2.) * (w_a[1:, k].T @ K_x @ w_a[1:, k])
+            # p = (self.lam/2.) * (self.alpha[1:].T @ K_x @ self.alpha[1:])
         else:
-            p = (self.lam/2.) * (self.alpha[1:].T @ f_wa)
+            suma = 0.0
+            for k in range(m):
+                suma += (self.lam/2.) * (w_a[1:, k].T @ f_wa[:, k])
+            # p = (self.lam/2.) * (self.alpha[1:].T @ f_wa)
 
-        return self.Obj(y, f_curr, p = p)
+        return self.Obj(y_b, f_curr, p = suma)
 
     def update_K_train(self, u_new, T, K_x_uc):
         """
@@ -739,11 +781,11 @@ class PhyloKernel:
             if  self.check_convergence(new_sig, curr_sig, 
                                       g_norm=self.grad_tol*2, 
                                       lam2=lam_sq, 
-                                      i = i ) and  \
+                                      i = i + 1) and  \
                 self.check_convergence(new_Kw, curr_Kw, 
                                       g_norm=self.grad_tol*2, 
                                       lam2=lam_sq, 
-                                      i = i ):
+                                      i = i  + 1):
                 if self.verbose:
                     print(f"Converged at iteration {i + 1}, phylogenetic correlation parameter: {self.psc},\
                             new score: {new_score}, old score: {curr_score}, alpha: {np.exp(-self.psc)}")
@@ -801,13 +843,19 @@ class PhyloKernel:
 
         self.fit0(X, y, vcv)
 
-        best_M = None
-        best_score = np.inf
         if self.do_agop:
+            best_M = None
+            best_score = np.inf
+
             for _ in range(self.agop_iter):
                 W = self.alpha[1:]
-                
-                M = agop(self, self.f_curr, self.y, W, self.lam,  
+                # TODO: Update to multiclass case
+                assert len(y.shape) == 1, "y should be a 1D array"
+
+                Du, mu = self.get_Du_mu_internal(self.f_curr) # O(nm)
+                Vu = self.get_Vu_func(self.f_curr) # O(nm)
+
+                M = agop(Du, mu, Vu, self.y, W, self.lam,  
                          self.X, self.K_train, self.M, self.gamma,
                          diag = self.agop_diag)
                 self.M = M / (M.max() + 1e-30)
@@ -821,6 +869,7 @@ class PhyloKernel:
                     best_M = self.M
 
                 # print(f"AGOP iter: {_ + 1}, score: {score}, best_score: {best_score}")
+                # print(self.M)
 
 
             self.M = best_M
@@ -1030,7 +1079,6 @@ class PhyloKernel:
             return 1 - (u / v)
 
 # region: Logistic regression
-
 class Logistic(PhyloKernel):
     """
     Kernel Ridge Generalized Estimating Equations for 1 cluster.
@@ -1140,6 +1188,7 @@ class Logistic(PhyloKernel):
         Get the quasi-likelihood function for the logistic model
         """
         # u = np.clip(u, eps, 1 - eps)
+        # u = self.mu(f_curr)
         return (1/self.phi) * (y * np.log(u) + (1 - y) * np.log(1 - u))
     
     def score(self, X_test, y_test, R_12 = None, metric = 'log_loss', eps = 1e-8):
@@ -1181,7 +1230,6 @@ class Logistic(PhyloKernel):
 
 
 # region: Multinomial regression
-
 class Multinomial(PhyloKernel):
     """
     Kernel Ridge Generalized Estimating Equations for 1 cluster.
@@ -1253,40 +1301,6 @@ class Multinomial(PhyloKernel):
         self.Du = p1_out * (1 - p1_out)
         return self.Du
 
-
-
-# main_file_path = "/Users/ulises/Desktop/MLab/Kernels/Kernel_sims/Kernel_sims/out_dir"
-
-# X = np.load(f"{main_file_path}/simulated_multiclass_X.npy")
-# y = np.load(f"{main_file_path}/simulated_multiclass_y.npy")
-# n = X.shape[0]
-
-# train_idx = np.random.choice(X.shape[0], size=int(n*0.5), replace=False)
-# test_idx = np.array(list(set(range(n)) - set(train_idx)))
-# R = np.ones((n, n)) * 15
-# np.fill_diagonal(R, 0)
-
-
-
-
-# memory_qn = np.sqrt(X.shape[0]).astype(int)
-# # memory_qn = X.shape[0]
-
-
-# # O(H*n + f + g),
-# # where H is the history and n is the number of variables.
-# # f is the time complexity of the function evaluation and 
-# # g is the time complexity of the gradient evaluation.
-
-
-# X_train, X_test = X[train_idx, :], X[test_idx, :]
-# y_train, y_test = y[train_idx], y[test_idx]
-# vcv_train = R[train_idx,:][:,train_idx]
-# vcv_test_12 = R[test_idx,:][:,train_idx]
-
-
-# self = Multinomial(kernel='rbf',)
-
-# y = y_train
-# X = X_train
-# vcv = vcv_train
+    def Q(self, y, u):
+        # u = self.mu(f_curr)
+        return (1/self.phi) * np.sum(y * np.log(u), axis=1) # row-wise sum

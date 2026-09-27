@@ -107,11 +107,14 @@ def agop(Du, mu, Vu, y, W, lam, X, K, M, gamma, diag = False):
     G = np.zeros((n, X.shape[1]))
     for l in range(n):
         nabla_f_l = np.zeros(X.shape[1])
+        I_0 = np.ones(n)
+        I_0[l] = 0
         # O(p^2m + pnm) or O(pnm) if diag = True
         for j in range(m):
-            d = (-1/c1) * Du[l,j] * e[l,j] + (lam/2.) * W[l,j]
+            w1 = (-1./c1) * ( (W[:,j]*Du[l,j]*e[l,j]) + (W[l,j]*I_0*Du[:,j]*e[:,j]) )   # O(n)
+            w2 = (lam/2.) * W[l,j] * ( W[:,j] + I_0 * W[:,j] ) # O(n)
             # O(p^2 + pn) or O(pn) if diag = True
-            tmp = nabla_kw(l, K, X, M, gamma, W[:,j], diag=diag) * d
+            tmp = nabla_kw(l, K, X, M, gamma,  w1 + w2, diag=diag)
             # print("tmp: ",tmp)
             nabla_f_l += tmp
 
