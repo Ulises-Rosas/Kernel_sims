@@ -2,9 +2,12 @@ import numpy as np
 from numpy import linalg as la
 
 from phylokrr_dev.opt import (newton_raphson_step_v2, R_u, backtracking_line_search_rij)
-from phylokrr_dev.agop import agop, RBF_kernel
-# from agop_dev import agop, RBF_kernel
+# from phylokrr_dev.agop import agop
+from phylokrr_dev.RBF import RBF_kernel
 from phylokrr.kernels import linear_kernel
+
+from agop_dev import agop
+
 
 from scipy.optimize import minimize
 
