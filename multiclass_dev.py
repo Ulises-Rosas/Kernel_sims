@@ -2,7 +2,8 @@ import numpy as np
 from numpy import linalg as la
 
 from phylokrr_dev.opt import R_u
-from phylokrr_dev.agop import agop, RBF_kernel
+from phylokrr_dev.agop import agop
+from phylokrr_dev.RBF import RBF_kernel
 from phylokrr.kernels import linear_kernel
 
 from scipy.optimize import minimize
