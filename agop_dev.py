@@ -26,6 +26,7 @@ def nabla_kw(l, K, X, M, gamma, w, diag = False):
         else:
             assert len(M.shape) == 1, "M should be a vector when diag is True"
             b = -2. * gamma * M[:,None] * Dl_kl_w # O(pm), R^{p,m}
+            # b = -2. * gamma * M * Dl_kl_w # O(pm), R^{p,m} # needed it for obj agop
             # print("b ", b)
             return b
 
