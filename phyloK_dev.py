@@ -8,7 +8,7 @@ from phylokrr.kernels import linear_kernel
 
 from agop_dev import agop
 
-
+from scipy.linalg import sqrtm
 from scipy.optimize import minimize
 
 RED = "\033[31m"
@@ -67,6 +67,7 @@ class PhyloKernel:
         self.agop_iter = 5
         self.M = None
         self.agop_diag = True
+        self.agop_nogreedy = False
 
         # latent space bounds
         self.lb = -np.inf
@@ -848,7 +849,10 @@ class PhyloKernel:
 
         if self.do_agop:
             best_M = None
+            # best_score = self.score(X, y, vcv)
             best_score = np.inf
+            # print("score before agop: ", self.score(X, y, vcv))
+            print("score before agop: ", self.obj_curr)
 
             for _ in range(self.agop_iter):
                 W = self.alpha[1:]
@@ -865,14 +869,20 @@ class PhyloKernel:
                 del M
 
                 self.fit0(X, y, vcv)
+                # score = self.score(X, y, vcv)
                 score = self.obj_curr
 
-                if score < best_score:
+        
+                if self.agop_nogreedy:
                     best_score = score
                     best_M = self.M
+                else: 
+                    if score < best_score:
+                        best_score = score
+                        best_M = self.M                    
 
-                # print(f"AGOP iter: {_ + 1}, score: {score}, best_score: {best_score}")
-                # print(self.M)
+                print(f"AGOP iter: {_ + 1}, score: {score}, best_score: {best_score}")
+                print(np.round(self.M,3))
 
 
             self.M = best_M
