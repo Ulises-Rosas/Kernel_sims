@@ -35,7 +35,7 @@ def simple_centerK(K):
     return K_centered
 
 
-def R_u(T, u, center = True):
+def R_u(T, u, center = False):
     """
     Get the R centered matrix for the given T and u
     """
