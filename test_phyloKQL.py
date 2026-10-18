@@ -6,8 +6,9 @@ import argparse
 from phylokrr_dev.alpha_beta_weighting import (alpha_weighting, 
                                                split_data_idx)
 from phylokrr_dev.block_cross_validation import k_fold_cv_weigthed
-# from phylokrr_dev.phyloKPQL import Logistic
-from phylokrr_dev.phyloK import Logistic
+from phylokrr_dev.phyloK_v2 import Logistic
+# from phyloK_dev import Logistic
+# from phyloK_dev2 import Logistic
 
 from phylokrr.treeio import (parseNewickTree, 
                              is_leaf, get_adj, get_C, 
@@ -17,13 +18,11 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 
 
-def pre_process_V(V):
-    n, _ = V.shape
-    V = V/np.max(V)
-    detV_n = np.linalg.det(V)**(1/n)
-    print('detV_n: ', detV_n)
-    V = V/detV_n if detV_n != 0 else V
-    return V
+def standardize(A, axis=0):
+    """Zero mean, unit variance per column (A: n x d or n)."""
+    mu = A.mean(axis=axis, keepdims=True)
+    sd = A.std(axis=axis, keepdims=True) + 1e-12
+    return (A - mu) / sd
 
 def get_R( vcv ):
     """
@@ -66,25 +65,6 @@ def process_D(D, root, leaves, adj, C,
     else:
         raise ValueError("process must be either 'BM' or 'OU'")
 
-def get_from_file(leaves, filename = "./traits_R.csv"):
-    
-    n = len(leaves)
-    from_R = {}
-    with open(filename, 'r') as f:
-        for i in f.readlines():
-            a,b,c = i.split(',')
-            if  a == '""':
-                continue
-            from_R[a.replace('"','')] = [float(b),float(c)]
-
-    k = 0
-    X = np.zeros((n, 2))
-    for l in leaves:
-        X[k,:] = from_R[l]
-        k += 1
-
-    return X
-
 
 def simulate_data(D, root, leaves, adj, C, 
                   tree,
@@ -95,9 +75,9 @@ def simulate_data(D, root, leaves, adj, C,
                   data_model = 'spiral',
                   bias=None, 
                   process = 'OU',
-                  spps_test = [],
                   rng = np.random.default_rng(seed=12038),
-                  data_process = 'BM'):
+                  data_process = 'BM',
+                  c1 = 1):
     """
     Following binaryPGLMM {ape} code for generating correlated data
     """    
@@ -110,7 +90,8 @@ def simulate_data(D, root, leaves, adj, C,
     # Ve, leaves2 = get_vcv(tree, process=process, sigma2=sigma_e, alpha=alpha_ou_e)
 
     names = [n.name for n in leaves]
-
+    # Dsim = D/np.max(D) # scale D to [0,1]
+    # sigma is choosen such that the branch lengths are scaled to [0,1] 
     V = process_D(D, root, leaves, adj, C, 
                   sigma2=sigma, alpha=alpha_ou,
                     process=data_process)
@@ -118,6 +99,10 @@ def simulate_data(D, root, leaves, adj, C,
     Ve = process_D(D, root, leaves, adj, C, 
                   sigma2=sigma_e, alpha=alpha_ou_e, 
                   process=data_process)
+    # print("data_process: ", data_process)
+    # print('D[0:5,0:5]: ', D[0:5,0:5])
+    # print("V[0:5,0:5]: ", V[0:5,0:5])
+    # print("Ve[0:5,0:5]: ", Ve[0:5,0:5])
 
     V = np.round(V, decimals=5) 
     n = V.shape[0]
@@ -126,7 +111,10 @@ def simulate_data(D, root, leaves, adj, C,
         R = 2*D/np.max(D)
 
     elif process == 'BM':
-        R = get_R(V)  # Get correlation matrix
+        D = 2*D/np.max(D)
+        V0 = process_D(D, root, leaves, adj, C, 
+                       sigma2=1, alpha=1,process='BM')
+        R = get_R(V0)  # Get correlation matrix
 
     else:
         raise ValueError("process must be either 'BM' or 'OU'")
@@ -134,7 +122,6 @@ def simulate_data(D, root, leaves, adj, C,
     # R = get_R(V)  # Get correlation matrix
     # print(V[0:5,0:5])
     # print(R[0:5,0:5])
-
     X = rng.multivariate_normal(np.zeros(n), V, 2).T
     e = rng.multivariate_normal(np.zeros(n), Ve, 1).T.ravel()
 
@@ -171,13 +158,17 @@ def simulate_data(D, root, leaves, adj, C,
         w = 1.5 # change this later.
         b = 0.1 if bias is None else bias
         # print('bias: ', b)
-        eta = 1.25 - np.sqrt(X[:, 0]**2 + w * X[:, 1]**2) + b + e
+        f_ = 1.25 - np.sqrt(X[:, 0]**2 + w * X[:, 1]**2)
+        # eta = np.sqrt(c1) * standardize(f_) + b + e        
+        eta = f_ + b + e 
 
     elif data_model == '5-sphere':
         # 5d-sphere
-        X = rng.multivariate_normal(np.zeros(n), V, 10).T        
+        X = rng.multivariate_normal(np.zeros(n), V, 15).T        
         b = -0.5 if bias is None else bias
-        eta = 1 - 0.5*np.sqrt(X[:, 0]**2 + X[:, 1]**2 + X[:, 2]**2 + X[:, 3]**2 + X[:, 4]**2) + b + e
+        f = 1 - 0.5*np.sqrt(X[:, 0]**2 + X[:, 1]**2 + X[:, 2]**2 + X[:, 3]**2 + X[:, 4]**2)
+        # eta = standardize(f)  + b + e
+        eta = f  + b + e
 
     elif data_model == '20-sphere':
         # 20d-sphere
@@ -189,13 +180,29 @@ def simulate_data(D, root, leaves, adj, C,
         # 20d-sphere
         X = rng.multivariate_normal(np.zeros(n), V, 20).T        
         b = -0.5 if bias is None else bias
-        eta = 1 - 0.1*np.sqrt(np.sum(X**2, axis=1)) + b + e
+        f = 1 - 0.1*np.sqrt(np.sum(X[:,:5]**2, axis=1))
+        # eta = standardize(f) + b + e
+        eta = f + b + e
 
     elif data_model == 'friedman':
         # Friedman function
         X = rng.multivariate_normal(np.zeros(n), V, 10).T
+        # X[:,1] = np.sin(X[:,0])
+        # X[:,2] = np.cos(X[:,0])
+        # X[:,3] = np.sin(X[:,1]) * np.cos(X[:,2])
+        # X[:,4] = 0.25*(X[:,3])**2
         b = -0.5 if bias is None else bias
-        eta = 10*np.sin(np.pi*X[:, 0]*X[:, 1]) + 20*(X[:, 2] - 0.5)**2 + 10*X[:, 3] + 5*X[:, 4] + b + e
+        f_friedman = 10*np.sin(np.pi*X[:, 0]*X[:, 1]) + 20*(X[:, 2] - 0.5)**2 + 10*X[:, 3] + 5*X[:, 4]
+        # eta = np.sqrt(c1) * standardize(f_friedman) + b + e
+        eta = f_friedman + b + e
+
+    elif data_model == 'sines':
+        X = rng.multivariate_normal(np.zeros(n), V, 10).T
+        b = 0.0
+        f = 2*np.sin(np.pi *X[:,0]*X[:,1])+ 2*(X[:,2]*X[:,3])**2  +\
+            np.sin(2*np.pi*X[:,4]) +\
+            0.5*X[:,5]**2
+        eta = f + b + e
 
     elif data_model == 'linear':
         # linear pattern
@@ -221,40 +228,9 @@ def simulate_data(D, root, leaves, adj, C,
     # print(np.sum(P <= 1e-8))
     # print(P)
 
-    if not len(spps_test):
-        test_idx, train_idx = split_data_idx(Indx, P, rng)
-    else:
-        spps_test_set = set(spps_test)
-        test_idx = set()
-        for i,leaf in enumerate(names):
-            if leaf in spps_test_set:
-                test_idx.add(i)
-        
-        train_idx = set(range(len(names))) - test_idx
-        test_idx = list(test_idx)
-        train_idx = list(train_idx)
-
-        P[test_idx] = 0.0
-        P /= np.sum(P)
-
-    # print(P)
+    test_idx, train_idx = split_data_idx(Indx, P, rng)
 
     return X, y, train_idx, test_idx, R, P
-
-def conditional_latent(model, f_z, f_n, y, R_12):
-    y_c = np.clip(y, model.hessian_tol, 1 - model.hessian_tol)
-    # y_c = np.clip(y, 1e-2, 1 - 1e-2)
-    sig_inv_y = np.log(y_c/(1 - y_c))
-    f_z += R_12 @ model.R_inv @ (sig_inv_y - f_n)
-    return f_z
-
-def phylocorrected_logistic(lkrgee, Bphyolm, X_test, X_train, y_train, vcv_test_12):
-    eta_z = Bphyolm[0] + Bphyolm[1]*X_test[:,0] + Bphyolm[2]*X_test[:,1]
-    
-    eta_n = Bphyolm[0] + Bphyolm[1]*X_train[:,0] + Bphyolm[2]*X_train[:,1]
-    eta_zn = conditional_latent(lkrgee, eta_z, eta_n, y_train, vcv_test_12)
-    return np.exp(eta_zn)/(1+np.exp(eta_zn))
-    # return np.exp(eta_z)/(1+np.exp(eta_z))
 
 
 def main(data_model = 'spiral', seed = 12038, 
@@ -268,6 +244,7 @@ def main(data_model = 'spiral', seed = 12038,
          do_agop = True, # use average gradient outer product
          agop_iter = 6, # number of iterations for the average gradient outer product
          agop_diag = False, # use diagonal approximation for the average gradient outer product
+         agop_nogreedy = True, # use greedy approach for the average gradient outer product
          ):
 
     if not do_corr and do_adj:
@@ -301,9 +278,6 @@ def main(data_model = 'spiral', seed = 12038,
     with open(tree_file, 'r') as f: 
         tree = f.read().strip()
 
-    # tree, test_spps = init_split(tree, test_num)
-    test_spps = []
-
     # print(new_tree)
 
     D, root, leaves, adj, C = get_D(tree)
@@ -320,12 +294,12 @@ def main(data_model = 'spiral', seed = 12038,
 
     rng = np.random.default_rng(seed=seed)
 
-    C1 = 2**rng.uniform(-3, 4, 56)
-    C2 = 2**rng.uniform(-3, 4, 56)
+    # C1 = 2**rng.uniform(-3, 4, 56)
+    # C2 = 2**rng.uniform(-3, 4, 56)
     # SW = [1,5,10]
 
-    # C1 = np.linspace(1, 2, num = 1)
-    # C2 = np.linspace(1, 2, num = 1)
+    C1 = np.linspace(1, 2, num = 1)
+    C2 = np.linspace(1, 2, num = 1)
 
     # C1 = 2**rng.uniform(-3, 4, 1)    
     # C2 = 2**rng.uniform(-3, 4, 2)
@@ -359,7 +333,7 @@ def main(data_model = 'spiral', seed = 12038,
                 lkrr.corr_type = do_adj # ignore if do_corr is False, since it is not possible to adjust the latent space without correction during CV
                 lkrr.corr_scale_error = corr_scale_error
                 lkrr.agop_iter = agop_iter
-
+                lkrr.agop_nogreedy = agop_nogreedy 
                 log_reg = LogisticRegression()
                 rf_model = RandomForestClassifier(n_estimators=100, random_state=seed)
 
@@ -386,9 +360,9 @@ def main(data_model = 'spiral', seed = 12038,
                             sigma_e = sigma_e,
                             data_model = data_model,
                             process = process,
-                            spps_test=test_spps,
                             rng = rng,
-                            data_process = data_process
+                            data_process = data_process,
+                            c1 = c1
                             )
 
                 if nested_loop_verbose:
@@ -403,8 +377,8 @@ def main(data_model = 'spiral', seed = 12038,
 
                 # this keeps time complexity 
                 # bellow n^2, but still adaptive enough
-                lkrr.memory_qn = np.sqrt(X_train.shape[0]).astype(int)
-                # lkrr.memory_qn = X_train.shape[0]
+                # lkrr.memory_qn = np.sqrt(X_train.shape[0]).astype(int)
+                lkrr.memory_qn = X_train.shape[0]
 
                 test_ratio =  np.sum(y_test == 1)/len(y_test)
                 train_ratio = np.sum(y_train == 1)/len(y_train)
@@ -432,7 +406,7 @@ def main(data_model = 'spiral', seed = 12038,
 
                 # X_train /= np.linalg.norm(X_train, axis=-1).reshape(-1, 1)
                 # X_test /= np.linalg.norm(X_test, axis=-1).reshape(-1, 1)
-
+                W[train_idx] = 1/len(train_idx)
                 # lkrr.do_agop = do_agop
                 import time
                 start = time.time()
@@ -445,7 +419,7 @@ def main(data_model = 'spiral', seed = 12038,
                     seed=seed,
                     cores = cores
                 )
-
+                # lkrr_best_params =   {'lam': np.float64(0.001686068409563526), 'gamma': np.float64(0.258906851741006), 'corr': np.float64(0.049260178183150566)}
                 if nested_loop_verbose:
                     print('lkrr (+ phylo K) CV Time: ', time.time() - start)
                     print('lkrr best params: ', lkrr_best_params)
@@ -458,8 +432,14 @@ def main(data_model = 'spiral', seed = 12038,
                 lkrr.do_agop = do_agop # only applied when we know the hyperparameters.
                 lkrr.agop_diag = agop_diag 
                 lkrr.fit(X_train, y_train, vcv_train)
+
                 print('agop M:')
-                print(lkrr.M)
+                if lkrr.M is not None:
+                    print(np.round(lkrr.M, 3))
+
+                    with open(f"{folder_dir}/agop_M.csv", 'w') as f:
+                        # write the matrix M to a csv file
+                        np.savetxt(f, lkrr.M, delimiter=",") 
 
                 if nested_loop_verbose:
                     print('alpha param:', np.exp(-lkrr.psc))
@@ -545,6 +525,7 @@ if __name__ == "__main__":
     parser.add_argument('--do_agop', action='store_true', help='Use average gradient outer product (default: False)')
     parser.add_argument('--agop_diag', action='store_true', help='Use diagonal approximation for average gradient outer product (default: False)')
     parser.add_argument('--agop_iter', type=int, default=5, help='Number of iterations for average gradient outer product (default: 6)')
+    parser.add_argument('--agop_nogreedy', action='store_true', help='Not use greedy approach for average gradient outer product (default: False)')
 
     args = parser.parse_args()
 
@@ -561,7 +542,8 @@ if __name__ == "__main__":
           corr_scale_error=args.corr_scale_error,
           do_agop=args.do_agop,
           agop_diag=args.agop_diag,
-          agop_iter=args.agop_iter
+          agop_iter=args.agop_iter,
+          agop_nogreedy=args.agop_nogreedy,
         )
 
 """
