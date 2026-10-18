@@ -6,9 +6,9 @@ import argparse
 from phylokrr_dev.alpha_beta_weighting import (alpha_weighting, 
                                                split_data_idx)
 from phylokrr_dev.block_cross_validation import k_fold_cv_weigthed
-from phylokrr_dev.phyloK_v2 import Logistic
+# from phylokrr_dev.phyloK_v2 import Logistic
 # from phyloK_dev import Logistic
-# from phyloK_dev2 import Logistic
+from phyloK_dev2 import Logistic
 
 from phylokrr.treeio import (parseNewickTree, 
                              is_leaf, get_adj, get_C, 
@@ -116,6 +116,9 @@ def simulate_data(D, root, leaves, adj, C,
                        sigma2=1, alpha=1,process='BM')
         R = get_R(V0)  # Get correlation matrix
 
+    elif process == 'none':
+        R = np.eye(n)
+        
     else:
         raise ValueError("process must be either 'BM' or 'OU'")
 
