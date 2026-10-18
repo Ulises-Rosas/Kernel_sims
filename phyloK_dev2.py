@@ -2,11 +2,11 @@ import numpy as np
 from numpy import linalg as la
 
 from phylokrr_dev.opt import (newton_raphson_step_v2, backtracking_line_search_rij)
-# from phylokrr_dev.agop import agop
+from phylokrr_dev.agop import agop
 from phylokrr_dev.RBF import RBF_kernel
 from phylokrr.kernels import linear_kernel
 
-from agop_dev import agop
+# from agop_dev import agop
 
 from scipy.linalg import sqrtm
 from scipy.optimize import minimize
@@ -594,7 +594,8 @@ class PhyloKernel:
                 print('phi: ', self.phi)
                 print('fix_phi: ', self.fix_phi)
                 print()
-        
+
+        self.obj_curr = self.get_new_score(None, y)
         self.f_curr = f_curr
         self.y = y.copy()
 
@@ -857,9 +858,9 @@ class PhyloKernel:
         if self.do_agop:
             best_M = None
             # best_score = self.score(X, y, vcv)
-            best_score = np.inf
+            best_score = self.obj_curr
             # print("score before agop: ", self.score(X, y, vcv))
-            print("score before agop: ", self.obj_curr)
+            # print("score before agop: ", self.obj_curr)
 
             for _ in range(self.agop_iter):
                 W = self.alpha[1:]
@@ -888,8 +889,8 @@ class PhyloKernel:
                         best_score = score
                         best_M = self.M                    
 
-                print(f"AGOP iter: {_ + 1}, score: {score}, best_score: {best_score}")
-                print(np.round(self.M,3))
+                # print(f"AGOP iter: {_ + 1}, score: {score}, best_score: {best_score}")
+                # print(np.round(self.M,3))
 
 
             self.M = best_M
