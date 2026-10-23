@@ -7,9 +7,11 @@ from phylokrr_dev.RBF import RBF_kernel
 from phylokrr.kernels import linear_kernel
 
 # from agop_dev import agop
+from tree_solve_dev import solve_A_inv_b, get_tree_info, get_training_tree
+from phylokrr.treeio import is_leaf
 
-from scipy.linalg import sqrtm
-from scipy.optimize import minimize
+from scipy.special import expit, softmax
+from scipy.optimize import minimize, minimize_scalar
 
 RED = "\033[31m"
 RESET = "\033[0m"
@@ -37,7 +39,7 @@ def simple_centerK(K):
 
 def R_u(T, u, center = False):
     """
-    Get the R centered matrix for the given T and u
+    Get the R matrix for the given T and u
     """
     # u = np.clip(u, -4, 4) # clip u to avoid numerical issues
     alpha = np.exp(-u)
@@ -66,11 +68,14 @@ class PhyloKernel:
         self.reg = 'continous'
         self.process = "BM"
         self.inv_calculated = False
-        self.use_quasi_newton = False
+        self.use_quasi_newton = True
+        self.use_bracketing = False # for phylo signal optimization
+
         self.memory_qn = 10
         self.do_corr = False # do correction or not
         self.corr_type = 'shrink'
         self.corr_scale_error = 'std'
+        self.training_tree = None # for fast tree-based solve of R^-1 b, if available
 
         self.do_agop = False # do average gradient outer product or not
         self.agop_iter = 5
@@ -296,6 +301,9 @@ class PhyloKernel:
         V^(-1) = ( A^1/2  R      A^1/2  \phi)^-1
                =   A^-1/2 R^-1   A^-1/2 \phi^-1
 
+        when R is the identity this is simply:
+        V^(-1) = A^-1 \phi^-1
+
         O(n^2) complexity
 
         Parameters
@@ -335,55 +343,80 @@ class PhyloKernel:
         ddR_uc = ( alpha_u * T  - np.ones(T.shape) ) * dR_uc
         return R_uc, dR_uc, ddR_uc
 
+    def n_loss_terms(self, n, m):
+        """
+        Get N = number of loss terms, which is n*m for n samples and m classes
+        """
+        return n * m
+
+    def get_DuV_Inv(self, f_curr):
+        """
+        Du * V^-1, the per-entry weight of (y - mu) in the gradients.
+        Canonical links (Logistic, Multinomial) override this with 1/phi,
+        which also avoids 0 * inf when mu saturates.
+        """
+        Du, _ = self.get_Du(f_curr)
+        return Du * self.get_V_Inv(f_curr)    
+
     # region: Quasi-newton optimization
     def opt_rij_QN(self, y, T, Kx, uc = 1):
         """
         Optimize the phylogenetic correlation parameter using gradient descent
         using Quasi-Newton method (L-BFGS-B)
         """
-        n = y.shape[0]
-        w = self.alpha[1:]
-        bias = self.alpha[0]
+        n, m = self.get_dims(y)
+        W = self.alpha.reshape(n + 1, m, order='F')
+        bias, w = W[0, :], W[1:, :]
+        y_b = y.reshape(n, m, order='F')
 
-        def nabla_f(u_curr):
-            dR, R = self.dR_R(u_curr, T)
+        if self.use_bracketing:
+            def my_f(u_curr):
+                R = R_u(T, u_curr,  center = self.center_kernel)
+                f_w = (Kx + R) @ w
+                f_curr = f_w + bias
+                p = (self.lam/2.) * np.sum(w * f_w)
+                return self.Obj(y_b, f_curr, p)
 
-            f_w = (Kx + R) @ w
-            f_curr = f_w + bias
+            result = minimize_scalar(my_f, bounds=(-4.0, 4.0), method='bounded', options={'xatol': 1e-6})
+            self.psc = result.x
 
-            Du, u = self.get_Du(f_curr)
-            V_Inv = self.get_V_Inv(f_curr)
-            DuDa  = (Du[:,None] * dR) @ w
-            DuDaT_V = DuDa.T * V_Inv # O(n^2)
+        else:
+            N = self.n_loss_terms(n, m)
+            def fnabla_f(u_curr):
+                dR, R = self.dR_R(u_curr, T)
+                f_w = (Kx + R) @ w
+                f_curr = f_w + bias
 
-            dp1 = (self.lam/2.) * (w.T @ dR @ w)
-            g = -(1/n)*(DuDaT_V @ (y - u)) + dp1
-            return g
+                u = self.mu(f_curr)
+                DuV_inv = self.get_DuV_Inv(f_curr)
 
-        def f(u_curr):
-            R_uc  = R_u(T, u_curr, center = False)
-            R = self._center(R_uc)
-            f_w = (Kx + R) @ w # O(n^2)
-            f_curr = f_w + bias
-            p = (self.lam/2.) * (w.T @ f_w)
-            obj = self.Obj(y, f_curr, p)
-            return obj
+                dRw = dR @ w
+                dp1 = (self.lam/2.) * np.sum(w * dRw)
+                g = -np.sum(dRw * DuV_inv * (y_b - u) )/N + dp1
 
-        result = minimize(
-                    fun=f, 
-                    x0=uc, 
-                    method='L-BFGS-B',
-                    tol = self.tol,
-                    options={ 'maxiter': self.max_iter, 'maxcor': self.memory_qn },
-                    jac=nabla_f,
-                    bounds=[(-4.0, 4.0)] 
-                )
+                p = (self.lam/2.) * np.sum(w * f_w)
+                obj = self.Obj(y_b, f_curr, p)
+                return obj, g
+            
+            result = minimize(
+                        fun=fnabla_f, 
+                        x0=uc, 
+                        method='L-BFGS-B',
+                        tol = self.tol,
+                        options={ 'maxiter': self.max_iter,
+                                'maxcor': 15, 'maxls': 50, 
+                                'gtol': self.tol},
+                        jac=True,
+                        bounds=[(-4.0, 4.0)] 
+                    )
+            self.psc = result.x[0]
 
-        self.psc = result.x[0]
+
         conv = result.success
         if not conv:
             print(f"{RED}No convergence after %i iterations {RESET}" % self.max_iter)
             print(f"curr. alpha: {np.exp(-self.psc)}")
+        self.obj_curr = result.fun
 
     def get_dims(self, y):
         nm = y.shape
@@ -423,54 +456,45 @@ class PhyloKernel:
 
         assert len(self.alpha) > 0, "The model needs to be fitted first"
 
-        def nabla_f(w_a: np.ndarray) -> np.ndarray:
-            # w_a = self.alpha
+        y_b = y.reshape(n, m, order='F')
+        N = self.n_loss_terms(n, m)
+
+        def f_nablaf(w_a: np.ndarray) -> tuple[float, np.ndarray]:
 
             w_a = w_a.reshape(p + 1, m, order='F')
-            y_b = y.reshape(n, m, order='F')
 
             f_curr = K_a @ w_a
             # get derivatives of \mu and \mu
-            Du, u = self.get_Du(f_curr)
-            V_Inv = self.get_V_Inv(f_curr) # O(n^2)
+            # Du, u = self.get_Du(f_curr)
+            # V_Inv = self.get_V_Inv(f_curr) # O(np)
 
-            g = np.zeros((p + 1, m), dtype=K_dtype)
+            u = self.mu(f_curr)
+            DuV_inv = self.get_DuV_Inv(f_curr)
 
-            for k in range(m):
-                # k = 0
-                DuDa = Du[:,k][:,None] * K_a # O(n^2)
-                # print("V_Inv shape: ", V_Inv.shape)
-                DuDaT_V = DuDa.T * V_Inv[:,k] # O(n^2)
-
-                # gradient
-                g[:,k] = (-1/(n*m))*(DuDaT_V @ (y_b[:,k] - u[:,k])) + lK_0 @ w_a[:,k] # O(n^2)
-
-            return g.ravel(order = 'F')
-
+            # g = np.zeros((p + 1, m), dtype=K_dtype)
+            GP = lK_0 @ w_a 
+            g = -( K_a.T @ ( DuV_inv * (y_b - u) ) )/N + GP # O(n^2)
+            suma = 0.5 * np.sum(w_a * GP) # penalty term
             
-        def f(w_a: np.ndarray) -> float:
-            # w_a = self.alpha
+            # suma = 0
+            # for k in range(m):
+            #     # k = 0
+            #     # DuDa =  # O(n^2)
+            #     # print("V_Inv shape: ", V_Inv.shape)
+            #     # DuDaT_V =  # O(n^2)
+            #     gp = lK_0 @ w_a[:,k] # gradient of the penalty where it is 0 at the bias term (first value of gp)
+            #     # gradient
+            #     g[:,k] =  -( K_a.T @ ( Du[:,k] * V_Inv[:,k] * (y_b[:,k] - u[:,k]) ) )/(m*n) + gp # O(n^2)
+            #     suma += 0.5 * (w_a[1:,k].T @ gp[1:]) # penalty term, where the first value of gp is 0
 
-            # f_curr = K_a @ w_a
-            # pe = (self.lam/2.) * (w_a[1:].T @ K_a[:, 1:] @ w_a[1:])
-            # obj =  self.Obj(y, f_curr, p = pe)
-
-            w_a = w_a.reshape(p + 1, m, order='F') # w matrix
-            y_b = y.reshape(n, m, order='F') # big y, it does do anything if it is already in the right shape
-            f_curr = K_a @ w_a
-    
-            suma = 0
-            for k in range(m):
-                suma += (self.lam/2.) * (w_a[1:, k].T @ K_a[:, 1:] @ w_a[1:, k])
-
+            grad = g.ravel(order = 'F')
             obj = self.Obj(y_b, f_curr, suma)
-            return obj
-
+            return obj, grad
         # O(n^2) complexity mostly due to nabla_f and f evaluations
         # the optimization itself is O(nm) where m is the history size of the L-BFGS-B algorithm
         # by default m = 10, so the overall complexity is O(n^2)
         result = minimize(
-                    fun=f, 
+                    fun=f_nablaf, 
                     x0=self.alpha, 
                     method='L-BFGS-B',
                     # method='BFGS',
@@ -478,9 +502,9 @@ class PhyloKernel:
                     options={'maxiter': self.max_iter, 
                              'maxcor': self.memory_qn,
                              'maxls': 50,  
-                             'gtol': self.tol,  
+                             'gtol': self.tol,
                                },
-                    jac=nabla_f,
+                    jac=True,
                 )
 
         # O(n^2) complexity mostly due to nabla_f and f evaluations
@@ -497,13 +521,16 @@ class PhyloKernel:
         
         conv = result.nit <= self.max_iter and result.success
         self.alpha = result.x
-        self.f_curr = K_a @ self.alpha
+        f_curr = K_a @ self.alpha.reshape(p + 1, m, order='F')
+        self.f_curr = f_curr.ravel() if y.ndim == 1 else f_curr
         self.y = y.copy()
 
         if not conv:
             print(f"{RED}No convergence for weights after %i iterations {RESET}" % result.nit)
             print(f"{RED}gamma, phi, lam:, {self.gamma}, {self.phi}, {self.lam}{RESET}")
             print(f"{RED}first 4 weights: {self.alpha[:4]}{RESET}")
+
+        self.obj_curr = result.fun
     # endregion
 
     # region: Newton-Raphson optimization
@@ -721,14 +748,16 @@ class PhyloKernel:
         f_curr = f_wa + w_a[0,:]
 
         if K_x is not None:
-            suma = 0.0
-            for k in range(m):
-                suma += (self.lam/2.) * (w_a[1:, k].T @ K_x @ w_a[1:, k])
+            suma = (self.lam/2.) * np.sum(w_a[1:,:] * (K_x @ w_a[1:,:])) # penalty term
+            # suma = 0.0
+            # for k in range(m):
+            #     suma += (self.lam/2.) * (w_a[1:, k].T @ K_x @ w_a[1:, k])
             # p = (self.lam/2.) * (self.alpha[1:].T @ K_x @ self.alpha[1:])
         else:
-            suma = 0.0
-            for k in range(m):
-                suma += (self.lam/2.) * (w_a[1:, k].T @ f_wa[:, k])
+            suma = (self.lam/2.) * np.sum(w_a[1:,:] * f_wa) # penalty term
+            # suma = 0.0
+            # for k in range(m):
+            #     suma += (self.lam/2.) * (w_a[1:, k].T @ f_wa[:, k])
             # p = (self.lam/2.) * (self.alpha[1:].T @ f_wa)
 
         return self.Obj(y_b, f_curr, p = suma)
@@ -753,7 +782,7 @@ class PhyloKernel:
     # region: alternating optimization
     def step_fullK_opt(self, y, K_x, K_x_uc, vcv):
         
-        if self.use_quasi_newton:
+        if self.use_quasi_newton or y.ndim > 1:
 
             self.opt_weights_QN(self.K_train, y)
             self.opt_rij_QN(y, T = vcv, Kx = K_x, uc = self.psc)
@@ -774,7 +803,8 @@ class PhyloKernel:
         self.step_fullK_opt(y, K_x, K_x_uc, vcv)
 
 
-        curr_score = self.get_new_score(None, y)
+        # curr_score = self.get_new_score(None, y)
+        curr_score = self.obj_curr
         curr_sig = self.psc
         curr_Kw = self.f_curr.copy()
 
@@ -784,7 +814,8 @@ class PhyloKernel:
 
             self.step_fullK_opt(y, K_x, K_x_uc, vcv)
 
-            new_score = self.get_new_score(None, y)
+            # new_score = self.get_new_score(None, y)
+            new_score = self.obj_curr
 
             new_Kw = self.f_curr.copy()
             new_sig = self.psc
@@ -819,6 +850,18 @@ class PhyloKernel:
     # endregion: alternating optimization
 
     # region: fit
+
+    def _opt_weights_fixedK(self, y):
+        """
+        Weights for a fixed kernel (BM / none). Newton for one output, as in
+        phyloK_dev2; quasi-Newton for multiclass (Newton is single-output).
+        """
+        if y.ndim == 1:
+            self.opt_weights(self.K_train, y)
+        else:
+            self.opt_weights_QN(self.K_train, y)
+            # self.obj_curr = self.get_new_score(None, y)
+
     def fit0(self, X, y, vcv = None):
         """
         Fit the model
@@ -833,7 +876,7 @@ class PhyloKernel:
                     "BM needs a correlation matrix"                
             self.Rnn = vcv
             self.set_K_train(self.X)
-            self.opt_weights(self.K_train, y)
+            self._opt_weights_fixedK(y)
 
         elif self.process == 'OU':
             # initialize Rnn with u = self.init_u
@@ -846,7 +889,7 @@ class PhyloKernel:
 
         elif self.process == 'none':
             self.set_K_train(self.X)
-            self.opt_weights(self.K_train, y)
+            self._opt_weights_fixedK(y)
 
         else:
             raise ValueError("Model missing")
@@ -861,11 +904,13 @@ class PhyloKernel:
             best_score = self.obj_curr
             # print("score before agop: ", self.score(X, y, vcv))
             # print("score before agop: ", self.obj_curr)
+            n, m = self.get_dims(y)
 
             for _ in range(self.agop_iter):
-                W = self.alpha[1:]
-                # TODO: Update to multiclass case
-                assert len(y.shape) == 1, "y should be a 1D array"
+
+                W = self.alpha.reshape(n + 1, m, order='F')[1:,:]
+                if self.y.ndim == 1:
+                    W = W[:, 0]
 
                 Du, mu = self.get_Du_mu_internal(self.f_curr) # O(nm)
                 Vu = self.get_Vu_func(self.f_curr) # O(nm)
@@ -946,15 +991,57 @@ class PhyloKernel:
 
         return False
 
+    # region: solve for bias correction
+    def set_training_tree(self, nodes, leaves):
+        """
+        Set the training tree for bias correction
+        
+        Parameters
+        ----------
+        nodes : list
+            List of nodes in the training tree
+
+        leaves : list
+            List of leaves names in the training tree
+        """
+        if nodes is None or leaves is None:
+            self.training_tree = None
+            return
+        
+        self.training_tree = get_training_tree(nodes, leaves)
+        self.training_names = leaves
+
+    def _solve(self, E):
+
+        if self.training_tree is None or self.process != 'OU':
+            return la.solve(self.Rnn, E)
+
+        new_nodes, new_root = self.training_tree
+        children, parent, length, root, leaves = get_tree_info(new_root, new_nodes)
+        name_of = {n.index: n.name for n in new_nodes if is_leaf(n)}
+        row_of = {name: i for i, name in enumerate(self.training_names)}   # row order of X_train / e
+
+        alpha = np.exp(-self.psc)
+        E2 = E[:, None] if E.ndim == 1 else E
+
+        out = np.empty(E2.shape)
+        for k in range(E2.shape[1]):
+            b = {v: E2[row_of[name_of[v]], k] for v in leaves}
+            x = solve_A_inv_b(children, parent, length, alpha, root, b, leaves)
+            
+            for v in leaves:
+                out[row_of[name_of[v]], k] = x[v]
+
+        return out.ravel(order='F') if E.ndim == 1 else out
+    # endregion: solve for bias correction
+
     # region: prediction
     def correction_err_scale(self, e):
 
         if self.corr_scale_error == 'std':
-            std = np.std(e)
-            if std > 0:
-                w = 1.0/std
-            else:
-                w = 1.0
+            std = np.std(e, axis=0)
+            w = np.where(std > 0, 1.0 / np.where(std > 0, std, 1.0), 1.0)
+            # w = 1/std
 
         elif self.corr_scale_error == 'neff':
             n = len(e)
@@ -993,43 +1080,44 @@ class PhyloKernel:
         assert len(self.alpha) > 0, "The model needs to be fitted first"
         assert X_test is not None, "X_test should not be None"
 
+        # W is reshaped locally: self.alpha must stay flat for warm starts
+        n, m = self.get_dims(self.y)
+        W = self.alpha.reshape(n + 1, m, order='F')
+        b, w = W[0, :], W[1:, :]
+        # 1-D output for a single output (Logistic), (n_test, m) otherwise
+        shape = lambda f: f.ravel() if self.y.ndim == 1 else f
+
         if self.K_train is None:
-            f = self.alpha[0] * np.ones(X_test.shape[0])
+            return shape(np.tile(b, (X_test.shape[0], 1)))
+
+        if Rzn is None or self.process == 'none':
+            K_test = self.get_K(X_test, self.X, R = None)
+            return shape(K_test @ w + b)
+
+        if self.process == 'OU':
+            Rzn = R_u(T = Rzn, u = self.psc, center = False)
+
+        K_test = self.get_K(X_test, self.X, R = Rzn)
+        f =  K_test @ w + b # until here is ussually the way
+
+        if not self.do_corr:
+            return shape(f)
+
+        tmp_f = np.clip(self.f_curr, self.lb, self.ub)
+        eta_y = self.inv_af(self.y)
+        e = eta_y - tmp_f
+        e = e * self.correction_err_scale(e)
+
+        bias = (Rzn @ self._solve( e )).reshape(f.shape)
+
+        if self.corr_type == 'convex':
+            return shape((1.0 - self.corr)*f + self.corr*bias)
+        
+        elif self.corr_type == 'shrink':
+            return shape(f + self.corr*bias)
 
         else:
-
-            if Rzn is None or self.process == 'none':
-                K_test = self.get_K(X_test, self.X, R = None)
-                b, alpha = self.alpha[0], self.alpha[1:]
-                return  K_test @ alpha + b
-
-            if self.process == 'OU':
-                Rzn = R_u(T = Rzn, u = self.psc, center = False)
-
-            K_test = self.get_K(X_test, self.X, R = Rzn)
-            b, alpha = self.alpha[0], self.alpha[1:]
-            f =  K_test @ alpha + b # until here is ussually the way
-
-            if not self.do_corr:
-                return f
-            else:
-                tmp_f = np.clip(self.f_curr, self.lb, self.ub)
-                eta_y = self.inv_af(self.y)
-                e = eta_y - tmp_f
-                e *= self.correction_err_scale(e)
-
-                bias = Rzn @ la.solve( self.Rnn, e )
-
-                if self.corr_type == 'convex':
-                    return (1.0 - self.corr)*f + self.corr*bias
-                
-                elif self.corr_type == 'shrink':
-                    f_zn = f + self.corr*bias
-                    return f_zn
-
-                else:
-                    return f + bias
-
+            return shape(f + bias)
 
     def predict(self, X_test, R_12 = None):
         """
@@ -1140,11 +1228,9 @@ class Logistic(PhyloKernel):
 
     def mu(self, f):
 
-        # f_tresh = 10
-        # f_tresh = -np.log10(self.grad_tol)
-        f = np.clip(f, self.lb, self.ub)
-        mu =  1/(1 + np.exp(-f))
-        return mu
+        # f = np.clip(f, self.lb, self.ub)
+        # return  1/(1 + np.exp(-f))
+        return expit(f)
     
     def get_Du_mu_internal(self, x):
         """
@@ -1155,6 +1241,7 @@ class Logistic(PhyloKernel):
 
         # p1 * p0, derivative of mu estimator
         self.Du = p1_out * (1 - p1_out)
+        # self.Du = p1_out * expit(-x)
         return self.Du, p1_out
     
     def get_Vu_func(self, f_curr):
@@ -1164,7 +1251,15 @@ class Logistic(PhyloKernel):
 
         p1_out = self.mu(f_curr)
         self.Du = p1_out * (1 - p1_out)
+        # self.Du = p1_out * expit(-f_curr)
         return self.Du
+    
+    def get_DuV_Inv(self, f_curr):
+        r"""canonical (logit) link: 
+
+        p1 * (1 - p1)  *  [ 1/( p1 * (1 - p1) * phi) ] = 1/phi
+        """
+        return np.full(np.shape(f_curr), 1.0/self.phi)
 
     def inv_af(self, y):
         """
@@ -1208,9 +1303,9 @@ class Logistic(PhyloKernel):
         """
         Get the quasi-likelihood function for the logistic model
         """
-        # u = np.clip(u, eps, 1 - eps)
-        # u = self.mu(f_curr)
-        return (1/self.phi) * (y * np.log(u) + (1 - y) * np.log(1 - u))
+        u = np.clip(u, eps, 1 - eps)
+        # return (1/self.phi) *  (y * np.log(u) + (1 - y) * np.log1p(-u))
+        return (1/self.phi) *  (y * np.log(u) + (1 - y) * np.log(1 - u))
     
     def score(self, X_test, y_test, R_12 = None, metric = 'log_loss', eps = 1e-8):
         """
@@ -1266,19 +1361,16 @@ class Multinomial(PhyloKernel):
                  warm_start = False,
                  tol = 0.001,
                  verbose = False,
-                 get_corr = False,
-                 copy_R_inv = False,
                  copy_K_train = False,
                  fix_phi = False,
                  ) -> None:
         
         super().__init__(kernel = kernel, max_iter = max_iter,
                           lam = lam, warm_start = warm_start, 
-                          tol = tol, verbose = verbose, get_corr=get_corr, 
-                          copy_R_inv=copy_R_inv,copy_K_train= copy_K_train, fix_phi=fix_phi)
+                          tol = tol, verbose = verbose, 
+                          copy_K_train= copy_K_train, fix_phi=fix_phi)
 
         self.reg = 'multinomial'
-        self.use_quasi_newton = True
         
         self.grad_tol = 1e-10
         # latent bounds
@@ -1297,12 +1389,13 @@ class Multinomial(PhyloKernel):
         # f_tresh = 10
         # f_tresh = -np.log10(self.grad_tol)
         # f  = np.random.normal(1, 1, size = (3, 4))
+        # f = self.K_train @ self.alpha.reshape(n + 1,m, order = "F")[1:,:]
 
-        f = np.clip(f, self.lb, self.ub)
-        exp_f = np.exp(f - f.max(axis=1, keepdims=True))  # for numerical stability
-        sum_exp_f = np.sum(exp_f, axis=1, keepdims=True)
-        mu = exp_f / sum_exp_f
-        return mu
+        # f = np.clip(f, self.lb, self.ub)
+        # exp_f = np.exp(f - f.max(axis=1, keepdims=True))  # for numerical stability
+        # sum_exp_f = np.sum(exp_f, axis=1, keepdims=True)
+        # mu = exp_f / sum_exp_f
+        return softmax(f, axis=1)
 
     def get_Du_mu_internal(self, f):
         """
@@ -1322,6 +1415,116 @@ class Multinomial(PhyloKernel):
         self.Du = p1_out * (1 - p1_out)
         return self.Du
 
-    def Q(self, y, u):
-        # u = self.mu(f_curr)
-        return (1/self.phi) * np.sum(y * np.log(u), axis=1) # row-wise sum
+    def get_DuV_Inv(self, f_curr):
+        """
+        canonical (softmax) link: the gradient of the log-likelihood w.r.t.
+        f is (y - mu)/phi, so Du * V^-1 = 1/phi
+        """
+        return np.full(np.shape(f_curr), 1.0/self.phi)    
+
+    def Q(self, y, u, eps=1e-12):
+        u = np.clip(u, eps, 1.0 - eps)
+        # m = y.shape[1]
+        return (1/self.phi) * y * np.log(u)
+        
+    def inv_af(self, y):
+        """
+        inverse of the activation function
+        """
+        # y_c = np.clip(y, self.hessian_tol, 1 - self.hessian_tol)
+        # # y_c = np.clip(y, np.min(y), np.max([1 - 1e-3, np.max(y)]))
+        # return np.log(y_c/(1 - y_c))
+        y_c = np.zeros(y.shape)
+        y_c[y == 0] = self.lb
+        y_c[y == 1] = self.ub
+        return y_c
+
+    def predict_proba(self, X_test, R_12=None):
+        f = self.f_predict(X_test, R_12)
+        return self.mu(f)
+    
+    def predict(self, X_test, R_12=None):
+        """one-hot predicted class (same format as the training y)"""
+        prob = self.predict_proba(X_test, R_12)
+        out = np.zeros_like(prob)
+        out[np.arange(prob.shape[0]), np.argmax(prob, axis=1)] = 1.0
+        return out
+        
+    def score(self, X_test, y_test, R_12 = None, metric = 'log_loss', eps = 1e-8):
+        """
+        Score the model using the specified metric.
+        Parameters
+        ----------
+        X_test : np.ndarray
+            test data
+        y_test : np.ndarray
+            true labels
+        R_12 : np.ndarray, optional
+            correlation matrix, by default None
+        metric : str, optional
+            evaluation metric, by default 'log_loss'
+        eps : float, optional
+            small value to avoid division by zero, by default 1e-3
+
+        Returns
+        -------
+        float
+            evaluation score
+        """
+
+        if metric == 'loss':
+            prob = self.predict_proba(X_test, R_12)
+            return np.mean(np.argmax(prob, axis=1) != np.argmax(y_test, axis=1))
+        
+        elif metric == 'log_loss':
+            y_pred_prob = self.predict_proba(X_test, R_12)
+            # y_pred_prob = np.clip(y_pred_prob, eps, 1 - eps)
+            # log_losses = -( y_test*np.log(y_pred_prob) + (1 - y_test)*np.log(1 - y_pred_prob) )
+
+            log_losses = self.Q(y_test, y_pred_prob, eps=eps)
+            return - np.mean( log_losses )
+    
+        else:
+            raise ValueError("Invalid metric. Use 'loss' or 'log_loss'.")
+
+#    def nabla_f(w_a: np.ndarray) -> np.ndarray:
+#     # w_a = self.alpha
+
+#     w_a = w_a.reshape(p + 1, m, order='F')
+#     y_b = y.reshape(n, m, order='F')
+
+#     f_curr = K_a @ w_a
+#     # get derivatives of \mu and \mu
+#     Du, u = self.get_Du(f_curr)
+#     V_Inv = self.get_V_Inv(f_curr) # O(n^2)
+
+#     g = np.zeros((p + 1, m), dtype=K_dtype)
+
+#     for k in range(m):
+#         # k = 0
+#         DuDa = Du[:,k][:,None] * K_a # O(n^2)
+#         # print("V_Inv shape: ", V_Inv.shape)
+#         DuDaT_V = DuDa.T * V_Inv[:,k] # O(n^2)
+
+#         # gradient
+#         g[:,k] = (-1/(n*m))*(DuDaT_V @ (y_b[:,k] - u[:,k])) + lK_0 @ w_a[:,k] # O(n^2)
+
+#     return g.ravel(order = 'F')
+
+# def f(w_a: np.ndarray) -> float:
+#     # w_a = self.alpha
+
+#     # f_curr = K_a @ w_a
+#     # pe = (self.lam/2.) * (w_a[1:].T @ K_a[:, 1:] @ w_a[1:])
+#     # obj =  self.Obj(y, f_curr, p = pe)
+
+#     w_a = w_a.reshape(p + 1, m, order='F') # w matrix
+#     y_b = y.reshape(n, m, order='F') # big y, it does do anything if it is already in the right shape
+#     f_curr = K_a @ w_a
+
+#     suma = 0
+#     for k in range(m):
+#         suma += (self.lam/2.) * (w_a[1:, k].T @ K_a[:, 1:] @ w_a[1:, k])
+
+#     obj = self.Obj(y_b, f_curr, suma)
+#     return obj
