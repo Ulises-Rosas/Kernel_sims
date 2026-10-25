@@ -998,8 +998,9 @@ class PhyloKernel:
         
         Parameters
         ----------
-        nodes : list
-            List of nodes in the training tree
+        nodes : list or tuple
+            List of nodes in the training tree. If tuple, it is assumed
+            the it is the training tree tuple (nodes, root)
 
         leaves : list
             List of leaves names in the training tree
@@ -1007,8 +1008,14 @@ class PhyloKernel:
         if nodes is None or leaves is None:
             self.training_tree = None
             return
-        
-        self.training_tree = get_training_tree(nodes, leaves)
+
+        if isinstance(nodes, tuple) and len(nodes) == 2:
+            # means that it already have the tree format
+            # print("already pruned")
+            self.training_tree = nodes
+        else:
+            self.training_tree = get_training_tree(nodes, leaves)
+
         self.training_names = leaves
 
     def _solve(self, E):
