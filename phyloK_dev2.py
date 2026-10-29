@@ -7,7 +7,7 @@ from phylokrr_dev.RBF import RBF_kernel
 from phylokrr.kernels import linear_kernel
 
 # from agop_dev import agop
-from tree_solve_dev import solve_A_inv_b, get_tree_info, get_training_tree
+from phylokrr_dev.tree_solve import solve_A_inv_b, get_tree_info, get_training_tree
 from phylokrr.treeio import is_leaf
 
 from scipy.special import expit, softmax
@@ -74,7 +74,7 @@ class PhyloKernel:
         self.memory_qn = 10
         self.do_corr = False # do correction or not
         self.corr_type = 'shrink'
-        self.corr_scale_error = 'std'
+        self.corr_scale_error = None # continuous: no scaling (conditional mean in y units); 'std' for Logistic/Multinomial
         self.training_tree = None # for fast tree-based solve of R^-1 b, if available
 
         self.do_agop = False # do average gradient outer product or not
@@ -113,8 +113,8 @@ class PhyloKernel:
         # in form of a correlation matrix
         self.get_corr = get_corr 
 
-        self.Du_mu_func = lambda x: (np.ones(x.shape[0]), x)
-        self.Vu_func = lambda x: np.ones( x.shape[0] )
+        self.Du_mu_func = self.get_Du_mu_internal
+        self.Vu_func = self.get_Vu_func
         
         self.X = np.array([])
         self.y = np.array([])
@@ -536,8 +536,6 @@ class PhyloKernel:
     # region: Newton-Raphson optimization
     def opt_weights(self, K, y, Kx = None):
 
-        self.verbose = True
-
         n = y.shape[0]
         p = K.shape[1] if K is not None else 0
         K_dtype = K.dtype if K is not None else float
@@ -711,6 +709,14 @@ class PhyloKernel:
 
     def mu(self, f):
         return f
+
+    def get_Du_mu_internal(self, f):
+        """identity link: d mu / d f = 1, mu = f (used by AGOP)"""
+        return np.ones_like(f), f
+
+    def get_Vu_func(self, f_curr):
+        """Gaussian variance function v(mu) = 1"""
+        return np.ones_like(f_curr)
 
     def Q(self, y, u):
         return (1/self.phi) * -0.5 * (y - u)**2
@@ -915,9 +921,14 @@ class PhyloKernel:
                 Du, mu = self.get_Du_mu_internal(self.f_curr) # O(nm)
                 Vu = self.get_Vu_func(self.f_curr) # O(nm)
 
+                # the derivative of k = k_x + r w.r.t. x only involves k_x (r does not depend on x),
+                # so AGOP needs the uncentered RBF part with the current M, not K_train = K_x + R
+                assert self.kernel == 'rbf', "AGOP is implemented for the RBF kernel"
+                K_x = RBF_kernel(self.X, self.X, self.gamma, M = self.M)
                 M = agop(Du, mu, Vu, self.y, W, self.lam,  
-                         self.X, self.K_train, self.M, self.gamma,
+                         self.X, K_x, self.M, self.gamma,
                          diag = self.agop_diag)
+                del K_x
                 self.M = M / (M.max() + 1e-30)
                 del M
 
@@ -1150,10 +1161,10 @@ class PhyloKernel:
     
     def conditional_latent(self, f_n, y, R_12, std = 1):
         e = (self.inv_af(y) - f_n)/std
-        return R_12 @ self.R_inv @ e
+        return R_12 @ self._solve(e)
     # endregion: prediction
 
-    def score(self, X_test, y_test, metric='rmse', R_12 = None):
+    def score(self, X_test, y_test, R_12 = None, metric = 'rmse'):
         """
         The parameters already account for error correlation
         and the errors are assumed to be independent
@@ -1166,12 +1177,11 @@ class PhyloKernel:
         y_test : np.ndarray
             test target
 
-        metric : str, optional
-            metric to use, by default 'rmse' and 'r2' for continuous
-            targets and 'loss' for binary targets.
-
         R_12 : np.ndarray, optional
             Cross-correlation matrix between training and test data, by default None
+
+        metric : str, optional
+            'rmse' (default; lower is better) or 'r2' (higher is better)
 
         Returns
         -------
@@ -1179,7 +1189,7 @@ class PhyloKernel:
             score
         """
         assert len(self.alpha) > 0, "The model needs to be fitted first"
-        assert metric in ['rmse', 'loss', 'r2', 'log_loss'], "Invalid metric"
+        assert metric in ['rmse', 'r2'], "Invalid metric for continuous regression: use 'rmse' or 'r2'"
         
         # predict function is defined 
         # in the subclass
@@ -1222,6 +1232,7 @@ class Logistic(PhyloKernel):
                           copy_R_inv=copy_R_inv,copy_K_train= copy_K_train, fix_phi=fix_phi,)
 
         self.reg = 'logistic'
+        self.corr_scale_error = 'std'
         
         self.grad_tol = 1e-10
         # latent bounds
@@ -1378,6 +1389,7 @@ class Multinomial(PhyloKernel):
                           copy_K_train= copy_K_train, fix_phi=fix_phi)
 
         self.reg = 'multinomial'
+        self.corr_scale_error = 'std'
         
         self.grad_tol = 1e-10
         # latent bounds
