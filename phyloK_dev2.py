@@ -124,6 +124,7 @@ class PhyloKernel:
         
         self.copy_K = copy_K_train
         self.K_train = np.array([])
+        self.K_x = None # data kernel (no tree term), kept during fit() for AGOP
         self.K_col_mean = np.array([])
         self.K_all_mean = None
 
@@ -238,7 +239,9 @@ class PhyloKernel:
             pass
 
         else:
-            Kc = self.get_K(X, X, R = self.Rnn)
+            # data kernel kept for AGOP (r does not depend on x)
+            self.K_x = self.get_K(X, X, R = None)
+            Kc = self.K_x if self.Rnn is None else self.K_x + self.Rnn
             self.K_train = np.asfortranarray(Kc, dtype=float)
 
 
@@ -369,10 +372,12 @@ class PhyloKernel:
         bias, w = W[0, :], W[1:, :]
         y_b = y.reshape(n, m, order='F')
 
+        Kxw = Kx @ w # w is fixed during the u step: O(n^2 m) once, not per evaluation
+
         if self.use_bracketing:
             def my_f(u_curr):
                 R = R_u(T, u_curr,  center = self.center_kernel)
-                f_w = (Kx + R) @ w
+                f_w = Kxw + R @ w
                 f_curr = f_w + bias
                 p = (self.lam/2.) * np.sum(w * f_w)
                 return self.Obj(y_b, f_curr, p)
@@ -384,7 +389,7 @@ class PhyloKernel:
             N = self.n_loss_terms(n, m)
             def fnabla_f(u_curr):
                 dR, R = self.dR_R(u_curr, T)
-                f_w = (Kx + R) @ w
+                f_w = Kxw + R @ w
                 f_curr = f_w + bias
 
                 u = self.mu(f_curr)
@@ -428,7 +433,12 @@ class PhyloKernel:
         return n, m
 
     def opt_weights_QN(self, K, y):
-        # K = self.K_train
+        """
+        Weights w~ = [b; w] for a fixed K with L-BFGS-B.
+        K^a = [1 K] and K_0 should not built:
+            K^a w~ = 1 b + K w,   lam K_0 w~ = [0; lam K w],   (K^a)^T r = [sum(r); K^T r]
+        so each evaluation costs two n x n by n x m products (K w and K^T r).
+        """
         n, m = self.get_dims(y)
 
         p = K.shape[1] if K is not None else 0
@@ -786,7 +796,7 @@ class PhyloKernel:
         self.K_train = np.asfortranarray(self.K_train, dtype=float)
 
     # region: alternating optimization
-    def step_fullK_opt(self, y, K_x, K_x_uc, vcv):
+    def step_fullK_opt(self, y, K_x, vcv):
         
         if self.use_quasi_newton or y.ndim > 1:
 
@@ -797,16 +807,24 @@ class PhyloKernel:
             self.opt_weights(self.K_train, y, Kx = None)
             self.opt_rij_gd_fullK(y, T = vcv, Kx = K_x, uc = self.psc)
 
-        self.update_K_train(u_new = self.psc, T = vcv, K_x_uc = K_x_uc)
+        self.update_K_train(u_new = self.psc, T = vcv, K_x_uc = K_x)
+        # f_curr was computed by the weight step with the previous u
+        self.refresh_f_curr(y)
+
+    def refresh_f_curr(self, y):
+        """f_curr = K_train w + b for the current weights and K_train, O(n^2 m)"""
+        n, m = self.get_dims(y)
+        W = self.alpha.reshape(n + 1, m, order='F')
+        f = self.K_train @ W[1:, :] + W[0, :]
+        self.f_curr = f.ravel() if y.ndim == 1 else f
     
 
     def fullK_opt(self, y, X, vcv):
 
-        K_x_uc = self.get_K(X, X, R = None)
-        K_x = self._center(K_x_uc)
+        self.K_x = self.get_K(X, X, R = None)
 
-        self.update_K_train(u_new = self.psc, T = vcv, K_x_uc = K_x_uc)
-        self.step_fullK_opt(y, K_x, K_x_uc, vcv)
+        self.update_K_train(u_new = self.psc, T = vcv, K_x_uc = self.K_x)
+        self.step_fullK_opt(y, self.K_x, vcv)
 
 
         # curr_score = self.get_new_score(None, y)
@@ -818,7 +836,7 @@ class PhyloKernel:
         conv = False
         for i in range(self.max_iter):
 
-            self.step_fullK_opt(y, K_x, K_x_uc, vcv)
+            self.step_fullK_opt(y, self.K_x, vcv)
 
             # new_score = self.get_new_score(None, y)
             new_score = self.obj_curr
@@ -900,16 +918,24 @@ class PhyloKernel:
         else:
             raise ValueError("Model missing")
 
+    def _state(self):
+        """fitted state after fit0 (n x n matrices by reference: fit0 always builds new ones)"""
+        return dict(alpha = np.array(self.alpha, copy=True), psc = self.psc,
+                    f_curr = np.array(self.f_curr, copy=True), obj_curr = self.obj_curr,
+                    y = self.y, M = self.M, K_train = self.K_train, Rnn = self.Rnn)
+
+    def _set_state(self, state):
+        for k, v in state.items():
+            setattr(self, k, v)
+
     def fit(self, X, y, vcv = None):
 
         self.fit0(X, y, vcv)
 
         if self.do_agop:
-            best_M = None
-            # best_score = self.score(X, y, vcv)
+            assert self.kernel == 'rbf', "AGOP is implemented for the RBF kernel"
             best_score = self.obj_curr
-            # print("score before agop: ", self.score(X, y, vcv))
-            # print("score before agop: ", self.obj_curr)
+            best = self._state()   # fit without AGOP (M = None)
             n, m = self.get_dims(y)
 
             for _ in range(self.agop_iter):
@@ -918,39 +944,36 @@ class PhyloKernel:
                 if self.y.ndim == 1:
                     W = W[:, 0]
 
-                Du, mu = self.get_Du_mu_internal(self.f_curr) # O(nm)
-                Vu = self.get_Vu_func(self.f_curr) # O(nm)
+                Du, _ = self.get_Du_mu_internal(self.f_curr) # O(nm)
+                # Vu = self.get_Vu_func(self.f_curr) # O(nm)
 
-                # the derivative of k = k_x + r w.r.t. x only involves k_x (r does not depend on x),
-                # so AGOP needs the uncentered RBF part with the current M, not K_train = K_x + R
-                assert self.kernel == 'rbf', "AGOP is implemented for the RBF kernel"
-                K_x = RBF_kernel(self.X, self.X, self.gamma, M = self.M)
-                M = agop(Du, mu, Vu, self.y, W, self.lam,  
+                # the derivative of k = k_x + r w.r.t. x only involves k_x (r does not depend on x):
+                # AGOP uses the data kernel of the current fit, kept by fit0 (no K_train = K_x + R)
+                K_x = getattr(self, 'K_x', None)
+                if K_x is None:
+                    K_x = RBF_kernel(self.X, self.X, self.gamma, M = self.M)
+                # legacy code
+                # M = agop(Du, mu, Vu, self.y, W, self.lam,  
+                #          self.X, self.K_x, self.M, self.gamma,
+                #          diag = self.agop_diag)
+                M = agop(Du, None, None, self.y, W, self.lam,  
                          self.X, K_x, self.M, self.gamma,
-                         diag = self.agop_diag)
+                         diag = self.agop_diag)                
                 del K_x
                 self.M = M / (M.max() + 1e-30)
                 del M
 
                 self.fit0(X, y, vcv)
-                # score = self.score(X, y, vcv)
                 score = self.obj_curr
 
-        
-                if self.agop_nogreedy:
+                if self.agop_nogreedy or score < best_score:
                     best_score = score
-                    best_M = self.M
-                else: 
-                    if score < best_score:
-                        best_score = score
-                        best_M = self.M                    
+                    best = self._state()
 
-                # print(f"AGOP iter: {_ + 1}, score: {score}, best_score: {best_score}")
-                # print(np.round(self.M,3))
+            # fit0 is deterministic: restore the best fit instead of refitting it
+            self._set_state(best)
 
-
-            self.M = best_M
-            self.fit0(X, y, vcv)
+        self.K_x = None # only needed by AGOP; keeps the saved model small
     # endregion: fit
 
 
