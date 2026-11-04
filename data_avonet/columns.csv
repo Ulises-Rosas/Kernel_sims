@@ -1,0 +1,25 @@
+column,variable,type,transform
+log_Beak.Length_Culmen,Beak.Length_Culmen,continuous,log
+log_Beak.Length_Nares,Beak.Length_Nares,continuous,log
+log_Beak.Width,Beak.Width,continuous,log
+log_Beak.Depth,Beak.Depth,continuous,log
+log_Tarsus.Length,Tarsus.Length,continuous,log
+log_Wing.Length,Wing.Length,continuous,log
+log_Kipps.Distance,Kipps.Distance,continuous,log
+log_Secondary1,Secondary1,continuous,log
+log_Hand-Wing.Index,Hand-Wing.Index,continuous,log
+log_Tail.Length,Tail.Length,continuous,log
+log_Mass,Mass,continuous,log
+log_Range.Size,Range.Size,continuous,log
+Centroid.Latitude,Centroid.Latitude,continuous,none
+Habitat.Density,Habitat.Density,ordinal,codes 1-3
+Migration,Migration,ordinal,codes 1-3
+Trophic.Level=Carnivore,Trophic.Level,binary,one-hot
+Trophic.Level=Herbivore,Trophic.Level,binary,one-hot
+Trophic.Level=Omnivore,Trophic.Level,binary,one-hot
+Trophic.Level=Scavenger,Trophic.Level,binary,one-hot
+Primary.Lifestyle=Aerial,Primary.Lifestyle,binary,one-hot
+Primary.Lifestyle=Aquatic,Primary.Lifestyle,binary,one-hot
+Primary.Lifestyle=Generalist,Primary.Lifestyle,binary,one-hot
+Primary.Lifestyle=Insessorial,Primary.Lifestyle,binary,one-hot
+Primary.Lifestyle=Terrestrial,Primary.Lifestyle,binary,one-hot
