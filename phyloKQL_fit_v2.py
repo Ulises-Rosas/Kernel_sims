@@ -1,33 +1,8 @@
 """
 Step 2/3 of the phyloKQL pipeline: FITTING.
 
-Loads the simulated data written by phyloKQL_simulate.py,
-
-    {folder_dir}/sim_{data_model}_{M1}_{M2}_{ID}.pkl          (or ..._batch{i}.pkl with --batch i)
-
-and, for every simulated replicate, standardizes the features and, for each
-model variant in VARIANTS (final model = CLI flags; no_tree = -p none;
-no_agop; no_corr; no_scale), runs the weighted k-fold CV for the Logistic
-(phylo) kernel model and refits it with the best hyperparameters (+ AGOP if
-requested). It also fits the baselines (logistic regression and random
-forest). Everything is saved to
-
-    {folder_dir}/models_{data_model}_{M1}_{M2}_{ID}.pkl       (or ..._batch{i}.pkl with --batch i)
-
-which is consumed by phyloKQL_infer.py.
-
 Version 2: with --tree_file, the tree is used during cross-validation and
-inference (fast tree-based solve of the correction, see test_phyloKQL.py):
-  * branch lengths are scaled to the scale of the OU distance matrix used by
-    the model, (2/t_max) * D, i.e. multiplied by 1/height with height = t_max/2
-    (t_max from the .pkl metadata if available, otherwise height = root-to-tip
-    path length of the first leaf, the tree being ultrametric)
-  * the tree is pruned to the training species of each dataset (get_training_tree)
-  * k_fold_cv_weigthed receives nodes = training-tree nodes, leaves = training species
-  * after CV, lkrr.set_training_tree(training tree, training species) is called
-    before the final fit, so the saved models are ready for inference
-If the file has several trees (one per line), the line of each dataset is
-selected with its tree_idx, as in phyloKQL_simulate.py.
+inference (fast tree-based solve of the correction, see test_phyloKQL.py)
 """
 import os
 import sys
@@ -39,17 +14,64 @@ import numpy as np
 
 from phylokrr.treeio import parseNewickTree, is_leaf
 try:
-    from phylokrr_dev.tree_solve import get_training_tree, clone_nodes
+    from phyloK.tree_solve import get_training_tree, clone_nodes
 except ImportError:  # local development copy, as in test_phyloKQL.py
     from tree_solve_dev import get_training_tree, clone_nodes
 
-from phylokrr_dev.block_cross_validation import k_fold_cv_weigthed
-from phylokrr_dev.phyloK_v2 import Logistic
-# from phyloK_dev import Logistic
-# from phyloK_dev2 import Logistic
+import importlib
 
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
+from phyloK.block_cross_validation import k_fold_cv_weigthed
+
+from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+
+# response type -> model class name (in --model_module)
+RESPONSE_TYPES = {
+    'logistic'   : 'Logistic',
+    'multinomial': 'Multinomial',
+    'continuous' : 'PhyloKernel',
+}
+
+
+def get_model_class(model_module, response_type):
+    """Logistic / Multinomial / PhyloKernel from e.g. phyloK_dev2 or phyloK.phyloK_v2"""
+    module = importlib.import_module(model_module)
+    return getattr(module, RESPONSE_TYPES[response_type])
+
+# m = get_model_class("phyloK.phyloK_v2", 'logistic')
+# a = m()
+# a.reg
+
+def check_response(y, response_type):
+    """shape / values of y must match the response type"""
+    if response_type == 'multinomial':
+        if y.ndim != 2 or y.shape[1] < 2 or not np.all(np.isin(y, (0, 1))) or not np.all(y.sum(axis=1) == 1):
+            raise ValueError("multinomial needs a one-hot y of shape (n, m), m >= 2")
+    elif y.ndim != 1:
+        raise ValueError(f"{response_type} needs a 1-D y, got shape {y.shape}")
+    elif response_type == 'logistic' and not np.all(np.isin(y, (0, 1))):
+        raise ValueError("logistic needs a binary (0/1) y")
+
+
+def fit_baselines(response_type, X_train, y_train, seed):
+    """non-phylogenetic baselines; classifiers use the class labels"""
+    if response_type == 'continuous':
+        lin_reg = LinearRegression()
+        rf_model = RandomForestRegressor(n_estimators=100, random_state=seed)
+        lin_reg.fit(X_train, y_train)
+        start = time.time()
+        rf_model.fit(X_train, y_train)
+        print(f'[rf] fit Time: ', time.time() - start)
+        return {'lin_reg': lin_reg, 'rf': rf_model}
+
+    labels = y_train if response_type == 'logistic' else np.argmax(y_train, axis=1)
+    log_reg = LogisticRegression() if response_type == 'logistic' else LogisticRegression(max_iter=1000)
+    rf_model = RandomForestClassifier(n_estimators=100, random_state=seed)
+    log_reg.fit(X_train, labels)
+    start = time.time()
+    rf_model.fit(X_train, labels)
+    print(f'[rf] fit Time: ', time.time() - start)
+    return {'log_reg': log_reg, 'rf': rf_model}
 
 
 def get_tag(data_model, M1, M2, ID):
@@ -121,8 +143,10 @@ def scaled_tree(newick, t_max = None):
 
 def fit_lkrr(cfg, X_train, y_train, vcv_train, W_train,
              seed, cores, verbose, folder_dir, name, batch_suffix = "",
-             also_no_agop = False, tree_train = None, spps_train = None):
-    """CV + refit of one Logistic (phylo) kernel model with configuration cfg.
+             also_no_agop = False, tree_train = None, spps_train = None,
+             model_class = None, response_type = 'logistic'):
+    """CV + refit of one phylo kernel model (model_class: Logistic, Multinomial
+    or PhyloKernel) with configuration cfg.
 
     If also_no_agop, the model is first fitted without AGOP (that copy is
     returned as the no_agop model) and then with AGOP, sharing the same CV.
@@ -143,10 +167,11 @@ def fit_lkrr(cfg, X_train, y_train, vcv_train, W_train,
         # ignore the tree regardless of how the data were simulated
         vcv_train = np.eye(vcv_train.shape[0])
 
-    lkrr = Logistic(get_corr= False, tol=cfg['tol'],
-                    max_iter=max_iter, kernel='rbf',
-                    verbose=not False,
-                    fix_phi = fix_phi)
+    model_kw = dict(tol=cfg['tol'], max_iter=max_iter, kernel='rbf',
+                    verbose=not False, fix_phi = fix_phi)
+    if response_type != 'multinomial':
+        model_kw['get_corr'] = False # Multinomial has no get_corr argument
+    lkrr = model_class(**model_kw)
     lkrr.add_extraK = True # backward compatibility with previous versions of phyloKQL
     lkrr.process = cfg['process']
     lkrr.use_quasi_newton = cfg['use_qn']
@@ -239,7 +264,7 @@ def main(data_model = 'friedman', seed = 12038, ID = "test", M1 = 1.0, M2 = 1.0,
          use_qn = True, folder_dir = 'in_dir',
          do_adj = 'shrink', # adjust the level of correction for the latent space,
          do_corr = True, # do correction during cv,
-         corr_scale_error = 'std', # divide error by the sample size. Options: [None, 'std', 'n', 'neff']
+         corr_scale_error = 'auto', # 'auto': std for logistic/multinomial, None for continuous. Options: [None, 'auto', 'std', 'n', 'neff']
          do_agop = True, # use average gradient outer product
          agop_iter = 5, # number of iterations for the average gradient outer product
          agop_diag = True, # use diagonal approximation for the average gradient outer product
@@ -248,6 +273,8 @@ def main(data_model = 'friedman', seed = 12038, ID = "test", M1 = 1.0, M2 = 1.0,
          batch = None, # simulation batch to fit (None -> unbatched simulation, --B 1)
          out_dir = 'out_dir',
          tree_file = None, # tree(s) for CV and inference with the tree-based solve
+         response_type = None, # logistic, multinomial or continuous (None -> meta of the .pkl, else logistic)
+         model_module = 'phyloK_dev2', # module with the Logistic / Multinomial / PhyloKernel classes
          ):
 
     tag = get_tag(data_model, M1, M2, ID)
@@ -264,6 +291,20 @@ def main(data_model = 'friedman', seed = 12038, ID = "test", M1 = 1.0, M2 = 1.0,
 
     if seed is None:
         seed = meta['seed']
+
+    # response type: CLI > simulation metadata > logistic
+    sim_response_type = meta.get('response_type')
+    if response_type is None:
+        response_type = sim_response_type or 'logistic'
+    elif sim_response_type is not None and response_type != sim_response_type:
+        raise ValueError(f"--response_type {response_type} does not match {sim_file} ({sim_response_type})")
+    if response_type not in RESPONSE_TYPES:
+        raise ValueError(f"--response_type must be one of {list(RESPONSE_TYPES)}")
+    model_class = get_model_class(model_module, response_type)
+    print(f"Response type: {response_type} -> {model_module}.{model_class.__name__}")
+
+    if corr_scale_error == 'auto':
+        corr_scale_error = None if response_type == 'continuous' else 'std'
 
     base_cfg = dict(process=process, tol=tol, use_qn=use_qn,
                     do_corr=do_corr, do_adj=do_adj,
@@ -293,6 +334,11 @@ def main(data_model = 'friedman', seed = 12038, ID = "test", M1 = 1.0, M2 = 1.0,
                              f"only '{meta['process']}' or 'none' are allowed")
         configs[name] = cfg
 
+    # no_scale only differs from final if the final model scales the error
+    if 'no_scale' in configs and 'final' in configs and configs['final']['corr_scale_error'] is None:
+        print("no_scale skipped: the final model does not scale the correction error (same model)")
+        del configs['no_scale']
+
     print('Model variants to fit:')
     for name, cfg in configs.items():
         print(f'  {name}: {cfg}')
@@ -319,6 +365,7 @@ def main(data_model = 'friedman', seed = 12038, ID = "test", M1 = 1.0, M2 = 1.0,
 
         X_train = X[train_idx, :].copy()
         y_train = y[train_idx]
+        check_response(y_train, response_type)
 
         X_train_offset = X_train.mean(axis=0)
         X_train_scale = X_train.std(axis=0)
@@ -363,6 +410,7 @@ def main(data_model = 'friedman', seed = 12038, ID = "test", M1 = 1.0, M2 = 1.0,
                 batch_suffix=batch_suffix,
                 also_no_agop = share_cv and name == 'final',
                 tree_train = tree_train, spps_train = spps_train,
+                model_class = model_class, response_type = response_type,
                 )
             if lkrr_no_agop is not None:
                 lkrr_models['no_agop'] = lkrr_no_agop
@@ -371,28 +419,21 @@ def main(data_model = 'friedman', seed = 12038, ID = "test", M1 = 1.0, M2 = 1.0,
 
         lkrr_models = {n: lkrr_models[n] for n in configs} # keep --variants order
 
-        log_reg = LogisticRegression()
-        rf_model = RandomForestClassifier(n_estimators=100, random_state=seed)
-
-        log_reg.fit(X_train, y_train)
-
-        start = time.time()        
-        rf_model.fit(X_train, y_train)
-        print(f'[rf] fit Time: ', time.time() - start)
-        
+        baselines = fit_baselines(response_type, X_train, y_train, seed)
 
         models[(c1, c2, split_weight)] = {
-            'lkrr': lkrr_models,          # {variant_name: fitted Logistic}
+            'lkrr': lkrr_models,          # {variant_name: fitted Logistic / Multinomial / PhyloKernel}
             'best_params': best_params,   # {variant_name: CV best params}
-            'log_reg': log_reg,
-            'rf': rf_model,
+            **baselines,                  # log_reg + rf (logistic, multinomial) or lin_reg + rf (continuous)
             'X_train_offset': X_train_offset,
             'X_train_scale': X_train_scale,
         }
         print()
 
     fit_meta = dict(meta, seed=seed, variants=configs,  # keeps sim_uid of the simulation
-                    fit_tree_file=tree_file, fit_tree_info=tree_info)
+                    fit_tree_file=tree_file, fit_tree_info=tree_info,
+                    response_type=response_type, model_module=model_module,
+                    classes=meta.get('classes'))
 
     out_file = os.path.join(out_dir, f"models_{tag}{batch_suffix}.pkl")
     with open(out_file, 'wb') as f:
@@ -425,7 +466,7 @@ if __name__ == "__main__":
     parser.add_argument('-q', '--use_qn', action=argparse.BooleanOptionalAction, default=True, help='Use quasi-Newton method (default: on; --no-use_qn to disable)')
     parser.add_argument('--do_adj', type=none_or_str, choices=[None, 'convex', 'shrink'], default='shrink', help="Adjust latent space (default: shrink; 'none' to disable)")
     parser.add_argument('--do_corr', action=argparse.BooleanOptionalAction, default=True, help='Do correction during CV (default: on; --no-do_corr to disable)')
-    parser.add_argument('--corr_scale_error', type=none_or_str, choices=[None, 'std', 'n', 'neff', 'std_neff'], default='std', help="Scale error for correction (default: std; 'none' to disable)")
+    parser.add_argument('--corr_scale_error', type=none_or_str, choices=[None, 'auto', 'std', 'n', 'neff', 'std_neff'], default='auto', help="Scale error for correction (default: auto = std for logistic/multinomial, none for continuous; 'none' to disable)")
     parser.add_argument('--do_agop', action=argparse.BooleanOptionalAction, default=True, help='Use average gradient outer product (default: on; --no-do_agop to disable)')
     parser.add_argument('--agop_diag', action=argparse.BooleanOptionalAction, default=True, help='Use diagonal approximation for average gradient outer product (default: on; --no-agop_diag to disable)')
     parser.add_argument('--agop_iter', type=int, default=5, help='Number of iterations for average gradient outer product (default: 5)')
@@ -434,6 +475,8 @@ if __name__ == "__main__":
 
     parser.add_argument('--batch', type=int, default=None, help='Simulation batch to fit, 0..B-1 (default: none -> unbatched simulation). In a Slurm array: --batch $SLURM_ARRAY_TASK_ID')
     parser.add_argument('--tree_file', type=str, default=None, help='Tree file (one Newick per line, as in the simulation) for CV and inference with the training tree (default: none)')
+    parser.add_argument('--response_type', type=str, choices=list(RESPONSE_TYPES), default=None, help='logistic (Logistic), multinomial (Multinomial) or continuous (PhyloKernel) (default: response_type of the .pkl, else logistic)')
+    parser.add_argument('--model_module', type=str, default='phyloK.phyloK_v2', help='Module with the model classes, e.g. phyloK_dev2 or phyloK.phyloK_v2 (default: phyloK.phyloK_v2)')
     args = parser.parse_args()
 
     main(data_model=args.data_model, seed=args.seed, ID=args.ID,
@@ -446,6 +489,7 @@ if __name__ == "__main__":
          agop_iter=args.agop_iter, agop_nogreedy=args.agop_nogreedy,
          variants=args.variants, batch=args.batch,
          out_dir=args.out_dir, tree_file=args.tree_file,
+         response_type=args.response_type, model_module=args.model_module,
          )
         
 

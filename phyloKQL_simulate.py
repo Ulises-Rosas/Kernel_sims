@@ -45,7 +45,7 @@ import argparse
 import numpy as np
 
 
-from phylokrr_dev.alpha_beta_weighting import (alpha_weighting, 
+from phyloK.alpha_beta_weighting import (alpha_weighting, 
                                                split_data_idx)
 
 from phylokrr.treeio import (parseNewickTree, 
@@ -440,7 +440,6 @@ def main(data_model = 'friedman', seed = 12038,
                     'tree_idx': tree_idx,
                     'tree_line': tree_lines[tree_idx],
                     'tip_names': [n.name for n in leaves], # row order of X, y and R
-                    't_max': float(t_max)
                 }
                 print()
 
@@ -451,6 +450,7 @@ def main(data_model = 'friedman', seed = 12038,
                 C1=list(C1), C2=list(C2), B=B,
                 n_trees=len(trees), tree_idxs=[int(t) for t in tree_idxs],
                 tree_lines=[tree_lines[int(t)] for t in tree_idxs], # per target simulation, loop order
+                t_max=float(t_max),
                 sim_uid=uuid.uuid4().hex) # lets fit/infer detect stale files
 
     tag = get_tag(data_model, M1, M2, ID)

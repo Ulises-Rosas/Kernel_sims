@@ -7,19 +7,6 @@ Loads the simulation (phyloKQL_simulate.py) and the fitted models
     {sim_dir}/sim_{data_model}_{M1}_{M2}_{ID}[_batch{i}].pkl
     {model_dir}/models_{data_model}_{M1}_{M2}_{ID}[_batch{i}].pkl
 
-(--sim_dir and --model_dir default to --folder_dir/-f)
-
-predicts the test set with every model and writes the summary file in the
-same format test_phyloKQL.py produced (rows: true, log_reg, rf, lkrr,
-lkrr_corr for the final model, plus lkrr_<variant> and lkrr_<variant>_corr for
-every other fitted variant, e.g. lkrr_no_tree, lkrr_no_tree_corr):
-
-    {folder_dir}/summary_results_{data_model}_{M1}_{M2}_{ID}.csv
-
-Batches (simulation run with --B > 1):
-  * --batch i : predicts batch i only -> summary_results_..._{ID}_batch{i}.csv
-  * no --batch: predicts all B batches (all models_*_batch{i}.pkl must exist)
-                and writes one combined summary_results_..._{ID}.csv
 """
 import os
 import pickle
@@ -42,7 +29,7 @@ def predict(sim_file, model_file):
         sim = pickle.load(f)
     datasets = sim['datasets']
 
-    # unpickling needs the model classes (phylokrr_dev) importable
+    # unpickling needs the model classes (phyloK) importable
     with open(model_file, 'rb') as f:
         fitted = pickle.load(f)
 

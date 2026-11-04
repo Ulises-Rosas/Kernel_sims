@@ -5,16 +5,6 @@ Loads the simulated data written by phyloKQL_simulate.py,
 
     {folder_dir}/sim_{data_model}_{M1}_{M2}_{ID}.pkl          (or ..._batch{i}.pkl with --batch i)
 
-and, for every simulated replicate, standardizes the features and, for each
-model variant in VARIANTS (final model = CLI flags; no_tree = -p none;
-no_agop; no_corr; no_scale), runs the weighted k-fold CV for the Logistic
-(phylo) kernel model and refits it with the best hyperparameters (+ AGOP if
-requested). It also fits the baselines (logistic regression and random
-forest). Everything is saved to
-
-    {folder_dir}/models_{data_model}_{M1}_{M2}_{ID}.pkl       (or ..._batch{i}.pkl with --batch i)
-
-which is consumed by phyloKQL_infer.py.
 """
 import os
 import copy
@@ -23,8 +13,8 @@ import pickle
 import argparse
 import numpy as np
 
-from phylokrr_dev.block_cross_validation import k_fold_cv_weigthed
-from phylokrr_dev.phyloK_v2 import Logistic
+from phyloK.block_cross_validation import k_fold_cv_weigthed
+from phyloK.phyloK_v2 import Logistic
 # from phyloK_dev import Logistic
 # from phyloK_dev2 import Logistic
 

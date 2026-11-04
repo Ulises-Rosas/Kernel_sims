@@ -3,17 +3,19 @@ import numpy as np
 import argparse
 
 
-from phylokrr_dev.alpha_beta_weighting import (alpha_weighting, 
+from phyloK.alpha_beta_weighting import (alpha_weighting, 
                                                split_data_idx)
-from phylokrr_dev.block_cross_validation import k_fold_cv_weigthed
-# from phylokrr_dev.phyloK_v2 import Logistic
+from phyloK.block_cross_validation import k_fold_cv_weigthed
+# from phyloK.phyloK_v2 import Logistic
 # from phyloK_dev import Logistic
-from phyloK_dev2 import Logistic
+from phyloK_dev2 import Logistic # clip needed
+# from phyloK_dev3 import Logistic
 
 from phylokrr.treeio import (parseNewickTree, 
                              is_leaf, get_adj, get_C, 
                              get_APSP, get_BM)
 
+from tree_solve_dev import get_training_tree
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 
@@ -46,7 +48,7 @@ def get_D(mytree):
     # each traversal is O(n)
     D = get_APSP(leaves, adj, C)
     
-    return D, root, leaves, adj, C
+    return D, root, leaves, adj, C, nodes
 
 def process_D(D, root, leaves, adj, C,
               sigma2, alpha, 
@@ -99,11 +101,6 @@ def simulate_data(D, root, leaves, adj, C,
     Ve = process_D(D, root, leaves, adj, C, 
                   sigma2=sigma_e, alpha=alpha_ou_e, 
                   process=data_process)
-    # print("data_process: ", data_process)
-    # print('D[0:5,0:5]: ', D[0:5,0:5])
-    # print("V[0:5,0:5]: ", V[0:5,0:5])
-    # print("Ve[0:5,0:5]: ", Ve[0:5,0:5])
-
     V = np.round(V, decimals=5) 
     n = V.shape[0]
 
@@ -261,7 +258,7 @@ def main(data_model = 'spiral', seed = 12038,
         #     'gamma'  : np.logspace(-15, 3, 100, base=2),
         # }
         params = {
-            'lam' : np.logspace(-10, 3, 100, base=2),
+            'lam' : np.logspace(-12, 3, 100, base=2),
             'gamma'  : np.logspace(-15, 4, 100, base=2),
         }
     else:
@@ -272,7 +269,7 @@ def main(data_model = 'spiral', seed = 12038,
         #     'corr' : np.logspace(-5, 0, 100, base=2)
         # }
         params = {
-            'lam' : np.logspace(-10, 3, 100, base=2),
+            'lam' : np.logspace(-12, 3, 100, base=2),
             'gamma'  : np.logspace(-15, 4, 100, base=2),
             'corr' : np.logspace(-10, 0, 100, base=2)
             # 'corr' : np.logspace(-5, 0, 100, base=2)
@@ -283,8 +280,25 @@ def main(data_model = 'spiral', seed = 12038,
 
     # print(new_tree)
 
-    D, root, leaves, adj, C = get_D(tree)
+    D, root, leaves, adj, C, nodes = get_D(tree)
     t_max = np.max(D)
+
+    # if t_max exist is available
+    height = t_max/2
+
+    # otherwise
+    # leaves = [node for node in nodes if is_leaf(node)]
+    # height = 0
+    # l = leaves[0]
+    # while l.ancestor is not None:
+    #     height += l.branch_length
+    #     l = l.ancestor
+
+    for n in nodes:
+        n.branch_length = n.branch_length * (1/height)
+
+
+    leafs_arr = np.array([n.name for n in leaves])
 
     
     fix_phi = True
@@ -299,25 +313,9 @@ def main(data_model = 'spiral', seed = 12038,
 
     # C1 = 2**rng.uniform(-3, 4, 56)
     # C2 = 2**rng.uniform(-3, 4, 56)
-    # SW = [1,5,10]
 
     C1 = np.linspace(1, 2, num = 1)
     C2 = np.linspace(1, 2, num = 1)
-
-    # C1 = 2**rng.uniform(-3, 4, 1)    
-    # C2 = 2**rng.uniform(-3, 4, 2)
-    
-    # C1 = [ 5 ]
-    # C2 = [ 0.5 ]
-
-    # c1_c2_str = "1.80 0.147"
-    # c1_c2_str = "1.32 0.131"
-    # c1_c2 = c1_c2_str.strip().split()
-    # C1 = [float(c1_c2[0])]
-    # C2 = [float(c1_c2[1])]
-
-    # SW = [1]
-    # SW = [1]
 
 
     out = {} 
@@ -337,6 +335,7 @@ def main(data_model = 'spiral', seed = 12038,
                 lkrr.corr_scale_error = corr_scale_error
                 lkrr.agop_iter = agop_iter
                 lkrr.agop_nogreedy = agop_nogreedy 
+                lkrr.agop_diag = agop_diag
                 log_reg = LogisticRegression()
                 rf_model = RandomForestClassifier(n_estimators=100, random_state=seed)
 
@@ -378,10 +377,16 @@ def main(data_model = 'spiral', seed = 12038,
                 vcv_train = R[train_idx,:][:,train_idx]
                 vcv_test_12 = R[test_idx,:][:,train_idx]
 
+                # it is a tuple (nodes, root)
+                spps_train = leafs_arr[train_idx]
+                tree_train = get_training_tree(nodes, spps_train)
+                
+
                 # this keeps time complexity 
                 # bellow n^2, but still adaptive enough
                 # lkrr.memory_qn = np.sqrt(X_train.shape[0]).astype(int)
-                lkrr.memory_qn = X_train.shape[0]
+                # lkrr.memory_qn = X_train.shape[0]
+                lkrr.memory_qn = 20
 
                 test_ratio =  np.sum(y_test == 1)/len(y_test)
                 train_ratio = np.sum(y_train == 1)/len(y_train)
@@ -413,6 +418,8 @@ def main(data_model = 'spiral', seed = 12038,
                 # lkrr.do_agop = do_agop
                 import time
                 start = time.time()
+                # lkrr.tol = 1e-4
+                # lkrr.use_bracketing = True
                 lkrr_best_params = k_fold_cv_weigthed(
                     X_train, y_train, vcv_train,
                     lkrr,  W[train_idx], params,
@@ -420,9 +427,12 @@ def main(data_model = 'spiral', seed = 12038,
                     sample=cv_sample, 
                     verbose= verbose, 
                     seed=seed,
-                    cores = cores
+                    cores = cores,
+                    nodes = tree_train[0],
+                    leaves = spps_train
                 )
-                # lkrr_best_params =   {'lam': np.float64(0.001686068409563526), 'gamma': np.float64(0.258906851741006), 'corr': np.float64(0.049260178183150566)}
+                # lkrr_best_params = {'lam': np.float64(0.0004584623587215366), 'gamma': np.float64(0.258906851741006), 'corr': np.float64(0.049260178183150566)}
+                # lkrr_best_params =   {'lam': np.float64(0.02292311793607683), 'gamma': np.float64(0.06845563584015797), 'corr': np.float64(0.3752329919328113)}
                 if nested_loop_verbose:
                     print('lkrr (+ phylo K) CV Time: ', time.time() - start)
                     print('lkrr best params: ', lkrr_best_params)
@@ -434,7 +444,12 @@ def main(data_model = 'spiral', seed = 12038,
 
                 lkrr.do_agop = do_agop # only applied when we know the hyperparameters.
                 lkrr.agop_diag = agop_diag 
+
+                lkrr.set_training_tree(tree_train, leafs_arr[train_idx])
+                start = time.time()
+                # lkrr.process = 'none'
                 lkrr.fit(X_train, y_train, vcv_train)
+                print('lkrr fit Time: ', time.time() - start)
 
                 print('agop M:')
                 if lkrr.M is not None:
